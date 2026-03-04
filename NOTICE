@@ -1,0 +1,7 @@
+Debit Card Reference
+Copyright 2026 Stellar Development Foundation
+
+This product includes software adapted from Bridge Ventures implementations.
+Primary derivation source is verified Solidity code on Worldscan:
+https://worldscan.org/address/0x6b0d105999491a48d5793fb6cb54f5ce079e0da9#code
+See THIRD_PARTY_NOTICES.md for details and license text.

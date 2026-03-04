@@ -1,0 +1,54 @@
+name: Contract Build
+
+on:
+  workflow_call: # allows this workflow to be called from another workflow
+
+env:
+  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN || '1.92.0' }}
+
+jobs:
+  build_and_test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal --target wasm32v1-none
+          rustup default ${RUST_TOOLCHAIN}
+          rustup component add rustfmt clippy --toolchain ${RUST_TOOLCHAIN}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Rust dependencies
+        uses: stellar/actions/rust-cache@main
+        with:
+          cache-targets: wasm32v1-none
+
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit &> /dev/null; then
+            cargo install cargo-audit
+          fi
+
+      - name: Build test wasm artifacts
+        run: make build
+
+      - name: Format check
+        run: cargo +${RUST_TOOLCHAIN} fmt -- --check
+
+      - name: Lint with Clippy (strict)
+        run: cargo +${RUST_TOOLCHAIN} clippy --workspace --all-targets --all-features -- -D warnings -D clippy::all
+
+      - name: Security audit
+        run: cargo +${RUST_TOOLCHAIN} audit
+
+      - name: Run tests
+        run: make test

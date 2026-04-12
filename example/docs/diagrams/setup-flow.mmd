@@ -1,0 +1,23 @@
+flowchart LR
+    subgraph S1["1 &middot; Keypairs"]
+        K["Generate or import<br/>6 role keypairs<br/>+ fund via Friendbot"]
+    end
+
+    subgraph S2["2 &middot; Token"]
+        T["Enter SEP-41<br/>token contract ID"]
+    end
+
+    subgraph S3["3 &middot; Factory"]
+        F["Upload issuer WASM<br/>Upload factory WASM<br/>Deploy factory contract"]
+    end
+
+    subgraph S4["4 &middot; Issuer"]
+        I["Call create_issuer<br/>with token + manager<br/>+ destination"]
+    end
+
+    K --> T --> F --> I
+
+    style S1 fill:#e8f5e9,stroke:#4caf50
+    style S2 fill:#e3f2fd,stroke:#2196f3
+    style S3 fill:#fff3e0,stroke:#ff9800
+    style S4 fill:#fce4ec,stroke:#e91e63

@@ -1,0 +1,37 @@
+@use "../../style/utils.scss" as *;
+
+.TabBar {
+  display: flex;
+  gap: pxToRem(2px);
+  border-bottom: 1px solid var(--sds-clr-gray-06);
+  padding: 0 pxToRem(24px);
+  overflow-x: auto;
+
+  &__tab {
+    padding: pxToRem(10px) pxToRem(16px);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--sds-clr-gray-09);
+    font-size: pxToRem(14px);
+    font-weight: var(--sds-fw-medium);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color var(--sds-anim-transition-default),
+      border-color var(--sds-anim-transition-default);
+
+    &:hover:not(:disabled) {
+      color: var(--sds-clr-gray-11);
+    }
+
+    &[data-active="true"] {
+      color: var(--sds-clr-lilac-07);
+      border-bottom-color: var(--sds-clr-lilac-07);
+    }
+
+    &:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+  }
+}

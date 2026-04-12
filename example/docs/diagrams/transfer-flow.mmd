@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant D as Debitor
+    participant App as Demo App
+    participant RPC as Soroban RPC
+    participant Fac as Factory
+    participant Iss as Issuer
+    participant Tok as Token
+
+    D->>App: Fill transfer form<br/>(account, amount, destination, uuid)
+    App->>RPC: simulateTransaction
+    RPC-->>App: simulation result
+    App->>App: Sign tx + auth entries
+    App->>RPC: sendTransaction
+    RPC->>Fac: transfer_to_destination()
+    Note over Fac: Pause check<br/>Debitor auth check<br/>Destination allowlist<br/>Velocity limits
+    Fac->>Iss: transfer_to_destination()
+    Iss->>Tok: transfer_from(issuer, account, dest, amount)
+    Tok-->>Iss: success
+    Iss-->>Fac: success
+    Fac-->>RPC: event emission
+    RPC-->>App: tx confirmed
+    App-->>D: Transfer complete

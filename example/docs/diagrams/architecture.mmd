@@ -1,0 +1,27 @@
+flowchart TD
+    subgraph Demo["Demo App (this project)"]
+        UI["Browser UI<br/>React + Vite"]
+    end
+
+    subgraph Stellar["Stellar Testnet"]
+        RPC["Soroban RPC"]
+        FB["Friendbot"]
+
+        subgraph Contracts["On-Chain Contracts"]
+            Factory["Factory Contract<br/><i>policy + orchestration</i>"]
+            Issuer["Issuer Contract<br/><i>per issuer_id + token</i>"]
+            Token["SEP-41 Token<br/><i>balances + allowances</i>"]
+        end
+    end
+
+    UI -- "deploy / invoke / simulate" --> RPC
+    UI -- "fund testnet accounts" --> FB
+    RPC --> Factory
+    RPC --> Token
+    Factory -- "deploys" --> Issuer
+    Factory -- "routes transfer" --> Issuer
+    Issuer -- "transfer_from" --> Token
+
+    style Demo fill:#f0f4ff,stroke:#4a6fa5
+    style Stellar fill:#fff8f0,stroke:#c4873b
+    style Contracts fill:#fff,stroke:#999

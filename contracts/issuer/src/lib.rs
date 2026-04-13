@@ -12,7 +12,7 @@
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env};
 
 #[contract]
 pub struct Issuer;
@@ -70,5 +70,24 @@ impl Issuer {
             &destination,
             &amount,
         );
+    }
+
+    /// Replaces this contract's WASM bytecode in-place.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_wasm_hash` - Hash of the uploaded WASM to install.
+    ///
+    /// # Authorization
+    /// Requires authorization from the stored factory address.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let factory: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Factory)
+            .expect("factory not set");
+        factory.require_auth();
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }

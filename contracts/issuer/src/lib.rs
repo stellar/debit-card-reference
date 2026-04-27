@@ -25,6 +25,15 @@ pub enum DataKey {
     Factory,
 }
 
+fn require_factory_auth(env: &Env) {
+    let factory: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Factory)
+        .expect("factory not set");
+    factory.require_auth();
+}
+
 #[contractimpl]
 impl Issuer {
     /// Initializes the issuer with the controlling factory address.
@@ -57,12 +66,7 @@ impl Issuer {
         destination: Address,
         amount: i128,
     ) {
-        let factory: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Factory)
-            .expect("factory not set");
-        factory.require_auth();
+        require_factory_auth(&env);
 
         token::TokenClient::new(&env, &token).transfer_from(
             &env.current_contract_address(),
@@ -81,12 +85,7 @@ impl Issuer {
     /// # Authorization
     /// Requires authorization from the stored factory address.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let factory: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Factory)
-            .expect("factory not set");
-        factory.require_auth();
+        require_factory_auth(&env);
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }

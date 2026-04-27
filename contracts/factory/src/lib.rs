@@ -73,8 +73,6 @@ pub enum FactoryError {
     IssuerManagerNotFound = 8,
     /// Issuer for the `(issuer_id, token)` pair already exists.
     IssuerAlreadyExists = 9,
-    /// Caller is not authorized for this operation.
-    NotAuthorized = 10,
     /// Operation requires the contract to be unpaused.
     EnforcedPause = 1000,
     /// Operation requires the contract to be paused.
@@ -496,10 +494,13 @@ impl Factory {
     /// * `new_owner` - Address to receive ownership.
     ///
     /// # Authorization
-    /// Requires authorization from the current owner. Not gated by pause state.
+    /// Requires authorization from both the current owner and the new owner.
+    /// The new-owner co-signature prevents accidental loss of ownership to an
+    /// unreachable address. Not gated by pause state.
     pub fn set_owner(env: Env, new_owner: Address) {
         let current_owner = owner(&env);
         current_owner.require_auth();
+        new_owner.require_auth();
 
         storage::set_owner(&env, &new_owner);
 
@@ -510,36 +511,51 @@ impl Factory {
         .publish(&env);
     }
 
-    /// Transfers the pauser role to a new address.
+    /// Transfers the pauser role to a new address via the owner recovery path.
     ///
-    /// When called by the owner, the pause guard is skipped so the owner can
-    /// recover from a compromised pauser key that has frozen the contract.
-    /// When called by the current pauser, the contract must not be paused.
+    /// The pause guard is intentionally skipped so the owner can rotate the
+    /// pauser even when the contract is paused. This is the recovery path used
+    /// when the pauser key is compromised and has frozen the contract.
     ///
     /// # Arguments
     /// * `env` - Contract environment.
-    /// * `caller` - Address invoking the operation (must be the current owner or pauser).
     /// * `new_pauser` - Address to receive the pauser role.
     ///
     /// # Authorization
-    /// Requires authorization from `caller`, who must be the current owner or pauser.
-    pub fn set_pauser(env: Env, caller: Address, new_pauser: Address) {
-        let current_owner = owner(&env);
-        let current_pauser = pauser(&env);
+    /// Requires authorization from the current owner. Not gated by pause state.
+    pub fn set_pauser_by_owner(env: Env, new_pauser: Address) {
+        owner(&env).require_auth();
 
-        if caller == current_owner {
-            caller.require_auth();
-        } else if caller == current_pauser {
-            require_not_paused(&env);
-            caller.require_auth();
-        } else {
-            panic_with_error!(&env, FactoryError::NotAuthorized);
+        let old_pauser = pauser(&env);
+        storage::set_pauser(&env, &new_pauser);
+
+        PauserUpdated {
+            old_pauser,
+            new_pauser,
         }
+        .publish(&env);
+    }
+
+    /// Transfers the pauser role to a new address via the pauser self-rotation path.
+    ///
+    /// The current pauser cannot rotate itself while the contract is paused;
+    /// recovery from a paused state must go through `set_pauser_by_owner`.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_pauser` - Address to receive the pauser role.
+    ///
+    /// # Authorization
+    /// Requires authorization from the current pauser and a non-paused contract state.
+    pub fn set_pauser_by_pauser(env: Env, new_pauser: Address) {
+        require_not_paused(&env);
+        let old_pauser = pauser(&env);
+        old_pauser.require_auth();
 
         storage::set_pauser(&env, &new_pauser);
 
         PauserUpdated {
-            old_pauser: current_pauser,
+            old_pauser,
             new_pauser,
         }
         .publish(&env);

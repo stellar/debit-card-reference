@@ -511,11 +511,7 @@ impl Factory {
         .publish(&env);
     }
 
-    /// Transfers the pauser role to a new address via the owner recovery path.
-    ///
-    /// The pause guard is intentionally skipped so the owner can rotate the
-    /// pauser even when the contract is paused. This is the recovery path used
-    /// when the pauser key is compromised and has frozen the contract.
+    /// Owner-driven pauser rotation. Bypasses the pause guard to recover from a compromised pauser.
     ///
     /// # Arguments
     /// * `env` - Contract environment.
@@ -538,9 +534,6 @@ impl Factory {
 
     /// Transfers the pauser role to a new address via the pauser self-rotation path.
     ///
-    /// The current pauser cannot rotate itself while the contract is paused;
-    /// recovery from a paused state must go through `set_pauser_by_owner`.
-    ///
     /// # Arguments
     /// * `env` - Contract environment.
     /// * `new_pauser` - Address to receive the pauser role.
@@ -561,7 +554,7 @@ impl Factory {
         .publish(&env);
     }
 
-    /// Replaces this contract's WASM bytecode in-place, preserving its address and storage.
+    /// Replaces the factory contract's WASM bytecode.
     ///
     /// # Arguments
     /// * `env` - Contract environment.
@@ -578,7 +571,7 @@ impl Factory {
         ContractUpgraded { new_wasm_hash }.publish(&env);
     }
 
-    /// Upgrades an issuer contract's WASM bytecode in-place.
+    /// Upgrades an issuer contract's WASM bytecode.
     ///
     /// # Arguments
     /// * `env` - Contract environment.

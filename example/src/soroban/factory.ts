@@ -84,39 +84,61 @@ export async function setAuthorizedManager({
   });
 }
 
+// `set_owner` requires authorization from BOTH the current owner and the new
+// owner. The new-owner co-signature prevents accidental loss of ownership to
+// an unreachable address — so the caller must supply both keypairs here.
 export async function setOwner({
   factoryId,
-  newOwner,
   ownerKeypair,
+  newOwnerKeypair,
 }: {
   factoryId: string;
-  newOwner: string;
   ownerKeypair: Keypair;
+  newOwnerKeypair: Keypair;
 }): Promise<void> {
   await invokeContract({
     contractId: factoryId,
     method: "set_owner",
-    args: [toScValAddress(newOwner)],
+    args: [toScValAddress(newOwnerKeypair.publicKey())],
+    signerKeypair: ownerKeypair,
+    additionalAuthSigners: [newOwnerKeypair],
+  });
+}
+
+// Owner-driven pauser rotation. Bypasses the pause guard, used to recover
+// from a compromised pauser that has frozen the contract.
+export async function setPauserByOwner({
+  factoryId,
+  newPauser,
+  ownerKeypair,
+}: {
+  factoryId: string;
+  newPauser: string;
+  ownerKeypair: Keypair;
+}): Promise<void> {
+  await invokeContract({
+    contractId: factoryId,
+    method: "set_pauser_by_owner",
+    args: [toScValAddress(newPauser)],
     signerKeypair: ownerKeypair,
   });
 }
 
-export async function setPauser({
+// Pauser self-rotation. Blocked while the contract is paused.
+export async function setPauserByPauser({
   factoryId,
-  caller,
   newPauser,
-  callerKeypair,
+  pauserKeypair,
 }: {
   factoryId: string;
-  caller: string;
   newPauser: string;
-  callerKeypair: Keypair;
+  pauserKeypair: Keypair;
 }): Promise<void> {
   await invokeContract({
     contractId: factoryId,
-    method: "set_pauser",
-    args: [toScValAddress(caller), toScValAddress(newPauser)],
-    signerKeypair: callerKeypair,
+    method: "set_pauser_by_pauser",
+    args: [toScValAddress(newPauser)],
+    signerKeypair: pauserKeypair,
   });
 }
 

@@ -4,6 +4,7 @@ import {
   rpc,
   xdr,
   Contract,
+  Address,
   authorizeEntry,
   Networks,
 } from "@stellar/stellar-sdk";
@@ -18,11 +19,13 @@ export async function invokeContract({
   method,
   args,
   signerKeypair,
+  additionalAuthSigners,
 }: {
   contractId: string;
   method: string;
   args: xdr.ScVal[];
   signerKeypair: Keypair;
+  additionalAuthSigners?: Keypair[];
 }): Promise<xdr.ScVal | undefined> {
   const server = getSorobanServer();
   const contract = new Contract(contractId);
@@ -44,31 +47,29 @@ export async function invokeContract({
     throw new Error(parseSimulationError(simulated.error));
   }
 
-  const prepared = rpc.assembleTransaction(tx, simulated).build();
-
-  // Sign auth entries if present
+  // Sign address-credentials auth entries BEFORE assembleTransaction so the
+  // signed entries are baked into the assembled tx's underlying XDR. Mutating
+  // `prepared.operations[0].auth` after `.build()` does NOT propagate — both
+  // `signatureBase()` and `toEnvelope()` serialize from `Transaction.tx` (the
+  // cached parsed XDR captured at build time), not from `operations[]`. Each
+  // address-credentials entry is signed by the keypair whose public key
+  // matches the credential address; this satisfies multi-signer flows (e.g.,
+  // set_owner co-signature) via `additionalAuthSigners`.
   if (simulated.result?.auth?.length) {
     const latestLedger = await server.getLatestLedger();
     const validUntilLedger = latestLedger.sequence + 100;
 
-    const signedAuth = await Promise.all(
+    const authKeypairs = [signerKeypair, ...(additionalAuthSigners ?? [])];
+
+    simulated.result.auth = await Promise.all(
       simulated.result.auth.map(
         (entry: xdr.SorobanAuthorizationEntry) =>
-          authorizeEntry(
-            entry,
-            signerKeypair,
-            validUntilLedger,
-            NETWORK_PASSPHRASE as typeof Networks.TESTNET,
-          ),
+          signAuthEntry(entry, authKeypairs, validUntilLedger),
       ),
     );
-
-    const op = prepared
-      .operations[0] as unknown as { auth: xdr.SorobanAuthorizationEntry[] };
-    if (op.auth) {
-      op.auth = signedAuth;
-    }
   }
+
+  const prepared = rpc.assembleTransaction(tx, simulated).build();
 
   prepared.sign(signerKeypair);
   const sendResult = await server.sendTransaction(prepared);
@@ -78,6 +79,37 @@ export async function invokeContract({
   }
 
   return pollTransaction(server, sendResult.hash);
+}
+
+async function signAuthEntry(
+  entry: xdr.SorobanAuthorizationEntry,
+  candidates: Keypair[],
+  validUntilLedger: number,
+): Promise<xdr.SorobanAuthorizationEntry> {
+  const credentials = entry.credentials();
+  // Source-account credentials are auto-satisfied by the transaction signer.
+  if (
+    credentials.switch() === xdr.SorobanCredentialsType.sorobanCredentialsSourceAccount()
+  ) {
+    return entry;
+  }
+
+  const requiredAddress = Address.fromScAddress(
+    credentials.address().address(),
+  ).toString();
+  const signer = candidates.find((kp) => kp.publicKey() === requiredAddress);
+  if (!signer) {
+    throw new Error(
+      `No keypair provided to sign auth entry for ${requiredAddress}`,
+    );
+  }
+
+  return authorizeEntry(
+    entry,
+    signer,
+    validUntilLedger,
+    NETWORK_PASSPHRASE as typeof Networks.TESTNET,
+  );
 }
 
 export async function simulateContract({

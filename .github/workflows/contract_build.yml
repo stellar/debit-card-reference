@@ -29,8 +29,6 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: stellar/actions/rust-cache@main
-        with:
-          cache-targets: wasm32v1-none
 
       - name: Install cargo-audit
         run: |

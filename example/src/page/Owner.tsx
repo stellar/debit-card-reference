@@ -1,21 +1,24 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Button, Card, Heading, Input, Text } from "@stellar/design-system";
 
-import { useAppState } from "@/store.ts";
+import { useAppState, useAppDispatch } from "@/store.ts";
 import { errorMessage } from "@/helper/errors.ts";
 import { hexToBytes } from "@/soroban/codec.ts";
 import {
   getOwner,
   getPauser,
   setOwner,
-  setPauser,
+  setPauserByOwner,
   upgradeFactory,
   upgradeIssuer,
 } from "@/soroban/factory.ts";
+import { importKeypair } from "@/soroban/keypairs.ts";
+import { getSecretKeyError } from "@/helper/validation.ts";
 import { uploadWasm } from "@/soroban/deploy.ts";
 
 export const Owner = () => {
   const state = useAppState();
+  const dispatch = useAppDispatch();
   const ownerKp = state.roles.owner.keypair;
 
   // --- Current owner / pauser display ---
@@ -47,57 +50,85 @@ export const Owner = () => {
   }, [fetchRoles]);
 
   // --- Transfer Ownership ---
-  const [newOwnerAddr, setNewOwnerAddr] = useState("");
+  // The contract requires a co-signature from the new owner, so we need its
+  // secret key (not just an address) to sign the auth entry.
+  const [newOwnerSecret, setNewOwnerSecret] = useState("");
+  const [newOwnerSecretError, setNewOwnerSecretError] = useState("");
   const [ownerTransferLoading, setOwnerTransferLoading] = useState(false);
   const [ownerTransferError, setOwnerTransferError] = useState("");
   const [ownerTransferResult, setOwnerTransferResult] = useState("");
 
   const handleSetOwner = useCallback(async () => {
     if (!ownerKp || !state.factoryContractId) return;
+    const validationError = getSecretKeyError(newOwnerSecret);
+    if (validationError) {
+      setNewOwnerSecretError(validationError);
+      return;
+    }
     setOwnerTransferLoading(true);
     setOwnerTransferError("");
     setOwnerTransferResult("");
     try {
+      const newOwnerKp = importKeypair(newOwnerSecret);
       await setOwner({
         factoryId: state.factoryContractId,
-        newOwner: newOwnerAddr,
         ownerKeypair: ownerKp,
+        newOwnerKeypair: newOwnerKp,
       });
+      const newOwnerAddr = newOwnerKp.publicKey();
+      // Rotate the local owner keypair so subsequent owner-only calls sign
+      // from the new on-chain owner. Without this, the next call would still
+      // use the old keypair as the source account and fail
+      // `current_owner.require_auth()`.
+      dispatch({ type: "SET_KEYPAIR", role: "owner", keypair: newOwnerKp });
       setOwnerTransferResult(`Ownership transferred to ${newOwnerAddr}`);
       setCurrentOwner(newOwnerAddr);
+      setNewOwnerSecret("");
     } catch (e) {
       setOwnerTransferError(errorMessage(e));
     } finally {
       setOwnerTransferLoading(false);
     }
-  }, [ownerKp, state.factoryContractId, newOwnerAddr]);
+  }, [ownerKp, state.factoryContractId, newOwnerSecret, dispatch]);
 
   // --- Transfer Pauser Role (as owner) ---
-  const [newPauserAddr, setNewPauserAddr] = useState("");
+  // Take the new pauser's secret (not just an address) so the example app can
+  // rotate its local pauser keypair on success — keeps the Pauser tab usable
+  // immediately after rotation. The contract itself only needs the address.
+  const [newPauserSecret, setNewPauserSecret] = useState("");
+  const [newPauserSecretError, setNewPauserSecretError] = useState("");
   const [pauserTransferLoading, setPauserTransferLoading] = useState(false);
   const [pauserTransferError, setPauserTransferError] = useState("");
   const [pauserTransferResult, setPauserTransferResult] = useState("");
 
   const handleSetPauser = useCallback(async () => {
     if (!ownerKp || !state.factoryContractId) return;
+    const validationError = getSecretKeyError(newPauserSecret);
+    if (validationError) {
+      setNewPauserSecretError(validationError);
+      return;
+    }
     setPauserTransferLoading(true);
     setPauserTransferError("");
     setPauserTransferResult("");
     try {
-      await setPauser({
+      const newPauserKp = importKeypair(newPauserSecret);
+      const newPauserAddr = newPauserKp.publicKey();
+      await setPauserByOwner({
         factoryId: state.factoryContractId,
-        caller: ownerKp.publicKey(),
         newPauser: newPauserAddr,
-        callerKeypair: ownerKp,
+        ownerKeypair: ownerKp,
       });
+      dispatch({ type: "SET_KEYPAIR", role: "pauser", keypair: newPauserKp });
       setPauserTransferResult(`Pauser role transferred to ${newPauserAddr}`);
       setCurrentPauser(newPauserAddr);
+      setNewPauserSecret("");
     } catch (e) {
       setPauserTransferError(errorMessage(e));
     } finally {
       setPauserTransferLoading(false);
     }
-  }, [ownerKp, state.factoryContractId, newPauserAddr]);
+  }, [ownerKp, state.factoryContractId, newPauserSecret, dispatch]);
 
   // --- Upgrade Factory ---
   const factoryWasmRef = useRef<HTMLInputElement>(null);
@@ -215,20 +246,29 @@ export const Owner = () => {
         <div className="PageSection__title">Transfer Ownership</div>
         <Card>
           <div className="FormStack">
+            <Text as="p" size="xs">
+              The contract requires a co-signature from the new owner to
+              prevent ownership being lost to an unreachable address. Paste the
+              new owner&apos;s secret key so this client can co-sign.
+            </Text>
             <Input
-              id="owner-new-owner"
+              id="owner-new-owner-secret"
               fieldSize="sm"
-              label="New Owner Address"
-              placeholder="G..."
-              value={newOwnerAddr}
-              onChange={(e) => setNewOwnerAddr(e.target.value)}
+              label="New Owner Secret Key"
+              placeholder="S..."
+              value={newOwnerSecret}
+              error={newOwnerSecretError}
+              onChange={(e) => {
+                setNewOwnerSecret(e.target.value);
+                setNewOwnerSecretError("");
+              }}
             />
             <Button
               size="sm"
               variant="destructive"
               onClick={handleSetOwner}
               isLoading={ownerTransferLoading}
-              disabled={!newOwnerAddr}
+              disabled={!newOwnerSecret}
             >
               Transfer Ownership
             </Button>
@@ -250,21 +290,27 @@ export const Owner = () => {
             <Text as="p" size="xs">
               As the owner, you can rotate the pauser even when the contract is
               paused. This is the recovery path for a compromised pauser key.
+              Paste the new pauser&apos;s secret key so this client can drive
+              the Pauser tab as the new pauser.
             </Text>
             <Input
-              id="owner-new-pauser"
+              id="owner-new-pauser-secret"
               fieldSize="sm"
-              label="New Pauser Address"
-              placeholder="G..."
-              value={newPauserAddr}
-              onChange={(e) => setNewPauserAddr(e.target.value)}
+              label="New Pauser Secret Key"
+              placeholder="S..."
+              value={newPauserSecret}
+              error={newPauserSecretError}
+              onChange={(e) => {
+                setNewPauserSecret(e.target.value);
+                setNewPauserSecretError("");
+              }}
             />
             <Button
               size="sm"
               variant="secondary"
               onClick={handleSetPauser}
               isLoading={pauserTransferLoading}
-              disabled={!newPauserAddr}
+              disabled={!newPauserSecret}
             >
               Transfer Pauser Role
             </Button>

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Button, Card, Heading, Input, Text } from "@stellar/design-system";
 
 import { useAppState, useAppDispatch } from "@/store.ts";
@@ -33,8 +33,32 @@ export const Setup = () => {
   // Deploy mode
   const [issuerWasm, setIssuerWasm] = useState<Uint8Array | null>(null);
   const [factoryWasm, setFactoryWasm] = useState<Uint8Array | null>(null);
+  const [bundledWasmsAvailable, setBundledWasmsAvailable] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployStatus, setDeployStatus] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchWasm = async (name: string) => {
+      const res = await fetch(`${import.meta.env.BASE_URL}wasm/${name}.wasm`);
+      if (!res.ok) throw new Error(`${name}.wasm: HTTP ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    };
+    Promise.all([fetchWasm("issuer"), fetchWasm("factory")])
+      .then(([issuer, factory]) => {
+        if (cancelled) return;
+        setIssuerWasm((prev) => prev ?? issuer);
+        setFactoryWasm((prev) => prev ?? factory);
+        setBundledWasmsAvailable(true);
+      })
+      .catch(() => {
+        // Bundled WASMs not present in this build (local dev without copying
+        // them into public/wasm). Fall back to manual upload.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Step 4 — Create Issuer
   const [issuerIdInput, setIssuerIdInput] = useState(() => bytesToHex(randomBytes32()));
@@ -420,11 +444,19 @@ export const Setup = () => {
                 </div>
               ) : (
                 <div className="FormStack">
-                  <Text as="p" size="xs">
-                    Upload the compiled WASM files from{" "}
-                    <code>contracts/target/</code>. Build them with{" "}
-                    <code>make build</code>.
-                  </Text>
+                  {bundledWasmsAvailable ? (
+                    <Text as="p" size="xs">
+                      Contracts built from this branch are bundled with the
+                      preview and pre-loaded below. Upload your own WASMs to
+                      override.
+                    </Text>
+                  ) : (
+                    <Text as="p" size="xs">
+                      Upload the compiled WASM files from{" "}
+                      <code>contracts/target/</code>. Build them with{" "}
+                      <code>make build</code>.
+                    </Text>
+                  )}
                   <div className="FormStack">
                     <label className="FileInput">
                       <span>Issuer WASM</span>

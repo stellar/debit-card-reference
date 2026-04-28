@@ -1,18 +1,21 @@
 import { useState, useCallback, useEffect } from "react";
 import { Button, Card, Heading, Input, Text } from "@stellar/design-system";
 
-import { useAppState } from "@/store.ts";
+import { useAppState, useAppDispatch } from "@/store.ts";
 import { errorMessage } from "@/helper/errors.ts";
 import {
   isPaused,
   pauseFactory,
   unpauseFactory,
   getPauser,
-  setPauser,
+  setPauserByPauser,
 } from "@/soroban/factory.ts";
+import { importKeypair } from "@/soroban/keypairs.ts";
+import { getSecretKeyError } from "@/helper/validation.ts";
 
 export const Pauser = () => {
   const state = useAppState();
+  const dispatch = useAppDispatch();
   const pauserKp = state.roles.pauser.keypair;
 
   const [paused, setPausedState] = useState<boolean | null>(null);
@@ -84,31 +87,43 @@ export const Pauser = () => {
   }, [pauserKp, state.factoryContractId]);
 
   // --- Transfer Pauser Role (as pauser) ---
-  const [newPauserAddr, setNewPauserAddr] = useState("");
+  // Take the new pauser's secret (not just an address) so the example app can
+  // rotate its local pauser keypair on success — keeps this tab usable
+  // immediately after rotation. The contract itself only needs the address.
+  const [newPauserSecret, setNewPauserSecret] = useState("");
+  const [newPauserSecretError, setNewPauserSecretError] = useState("");
   const [transferLoading, setTransferLoading] = useState(false);
   const [transferError, setTransferError] = useState("");
   const [transferResult, setTransferResult] = useState("");
 
   const handleTransferPauser = useCallback(async () => {
     if (!pauserKp || !state.factoryContractId) return;
+    const validationError = getSecretKeyError(newPauserSecret);
+    if (validationError) {
+      setNewPauserSecretError(validationError);
+      return;
+    }
     setTransferLoading(true);
     setTransferError("");
     setTransferResult("");
     try {
-      await setPauser({
+      const newPauserKp = importKeypair(newPauserSecret);
+      const newPauserAddr = newPauserKp.publicKey();
+      await setPauserByPauser({
         factoryId: state.factoryContractId,
-        caller: pauserKp.publicKey(),
         newPauser: newPauserAddr,
-        callerKeypair: pauserKp,
+        pauserKeypair: pauserKp,
       });
+      dispatch({ type: "SET_KEYPAIR", role: "pauser", keypair: newPauserKp });
       setTransferResult(`Pauser role transferred to ${newPauserAddr}`);
       setCurrentPauser(newPauserAddr);
+      setNewPauserSecret("");
     } catch (e) {
       setTransferError(errorMessage(e));
     } finally {
       setTransferLoading(false);
     }
-  }, [pauserKp, state.factoryContractId, newPauserAddr]);
+  }, [pauserKp, state.factoryContractId, newPauserSecret, dispatch]);
 
   return (
     <div>
@@ -176,24 +191,29 @@ export const Pauser = () => {
         <Card>
           <div className="FormStack">
             <Text as="p" size="xs">
-              Rotate the pauser to a new address. This call is blocked when the
+              Rotate the pauser to a new keypair. This call is blocked when the
               contract is paused (use the Owner tab to recover from a
-              compromised pauser).
+              compromised pauser). Paste the new pauser&apos;s secret key so
+              this tab keeps working as the new pauser.
             </Text>
             <Input
-              id="pauser-new-addr"
+              id="pauser-new-secret"
               fieldSize="sm"
-              label="New Pauser Address"
-              placeholder="G..."
-              value={newPauserAddr}
-              onChange={(e) => setNewPauserAddr(e.target.value)}
+              label="New Pauser Secret Key"
+              placeholder="S..."
+              value={newPauserSecret}
+              error={newPauserSecretError}
+              onChange={(e) => {
+                setNewPauserSecret(e.target.value);
+                setNewPauserSecretError("");
+              }}
             />
             <Button
               size="sm"
               variant="secondary"
               onClick={handleTransferPauser}
               isLoading={transferLoading}
-              disabled={!newPauserAddr}
+              disabled={!newPauserSecret}
             >
               Transfer Pauser Role
             </Button>

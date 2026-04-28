@@ -1,0 +1,162 @@
+name: Deploy PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+env:
+  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN || '1.92.0' }}
+
+jobs:
+  build-contracts:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal --target wasm32v1-none
+          rustup default ${RUST_TOOLCHAIN}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Rust dependencies
+        uses: stellar/actions/rust-cache@main
+
+      - name: Build issuer + factory WASMs
+        working-directory: contracts
+        run: cargo build -p issuer -p factory --target wasm32v1-none --release
+
+      - name: Upload contract artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasms
+          path: |
+            contracts/target/wasm32v1-none/release/factory.wasm
+            contracts/target/wasm32v1-none/release/issuer.wasm
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy-preview:
+    runs-on: ubuntu-latest
+    needs: [build-contracts]
+    if: ${{ always() && (github.event.action == 'closed' || needs.build-contracts.result == 'success') }}
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        if: github.event.action != 'closed'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: example/package.json
+
+      - name: Setup Node.js
+        if: github.event.action != 'closed'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: example/pnpm-lock.yaml
+
+      - name: Install dependencies
+        if: github.event.action != 'closed'
+        working-directory: example
+        run: pnpm install --frozen-lockfile
+
+      - name: Download contract artifacts
+        if: github.event.action != 'closed'
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-wasms
+          path: example/public/wasm
+
+      - name: Build React app
+        if: github.event.action != 'closed'
+        working-directory: example
+        run: VITE_BASE_PATH=/debit-card-reference/pr-preview/pr-${{ github.event.number }}/ pnpm run build
+
+      - name: Copy index.html to 404.html for SPA routing
+        if: github.event.action != 'closed'
+        run: cp ./example/dist/index.html ./example/dist/404.html
+
+      - name: Deploy PR Preview
+        if: github.event.action != 'closed'
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+          # Stash built files outside the working tree before switching branches
+          mv example/dist /tmp/dist
+
+          # Switch to gh-pages, creating it as an orphan branch the first time
+          if git ls-remote --exit-code --heads origin gh-pages; then
+            git fetch origin gh-pages:gh-pages
+            git checkout gh-pages
+          else
+            git checkout --orphan gh-pages
+            git rm -rf . 2>/dev/null || true
+          fi
+
+          # Create or update PR preview folder
+          mkdir -p pr-preview/pr-${{ github.event.number }}
+
+          # Copy built files
+          cp -r /tmp/dist/* pr-preview/pr-${{ github.event.number }}/
+
+          # Commit and push
+          git add pr-preview/pr-${{ github.event.number }}
+          git commit -m "Deploy preview for PR #${{ github.event.number }}" || echo "No changes to commit"
+          git push origin gh-pages
+
+      - name: Clean up PR Preview
+        if: github.event.action == 'closed'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if ! git ls-remote --exit-code --heads origin gh-pages; then
+            echo "gh-pages branch does not exist; nothing to clean"
+            exit 0
+          fi
+
+          git fetch origin gh-pages:gh-pages
+          git checkout gh-pages
+
+          # Remove PR preview folder
+          rm -rf pr-preview/pr-${{ github.event.number }}
+
+          # Commit and push
+          git add pr-preview/pr-${{ github.event.number }} || true
+          git commit -m "Remove preview for PR #${{ github.event.number }}" || echo "No changes to commit"
+          git push origin gh-pages
+
+      - name: Comment PR with preview URL
+        if: github.event.action != 'closed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.number }} --body "🚀 **Preview deployed!**
+
+          Preview URL: https://${{ github.repository_owner }}.github.io/debit-card-reference/pr-preview/pr-${{ github.event.number }}/
+
+          The contracts built from this PR are bundled in the preview, so the *Deploy New* flow works without a local Rust toolchain.
+
+          This preview will be automatically updated when you push new commits."
+
+      - name: Comment PR on cleanup
+        if: github.event.action == 'closed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.number }} --body "🧹 **Preview cleaned up**
+
+          The preview for this PR has been removed."

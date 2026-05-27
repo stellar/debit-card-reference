@@ -4,7 +4,10 @@
 extern crate std;
 
 use super::{
-    events::{ManagedUpdated, UserVelocityUpdated},
+    events::{
+        ContractUpgraded, IssuerUpgraded, ManagedUpdated, OwnerUpdated, PauserUpdated,
+        UserVelocityUpdated,
+    },
     storage::set_user_velocity,
     Factory, FactoryClient, FactoryError, UserVelocity,
 };
@@ -480,13 +483,12 @@ fn create_issuer_fails_for_duplicate_issuer_token_pair() {
     let setup = TestContext::for_flow(true, true);
     let factory = FactoryClient::new(&setup.env, &setup.factory_address);
 
-    let result = factory
-        .try_create_issuer(
-            &setup.issuer_id,
-            &setup.token_address,
-            &setup.manager,
-            &setup.destination,
-        );
+    let result = factory.try_create_issuer(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.manager,
+        &setup.destination,
+    );
 
     assert_eq!(result, Err(Ok(FactoryError::IssuerAlreadyExists.into())));
 }
@@ -1012,6 +1014,530 @@ fn velocity_overflow_maps_to_period_limit_error() {
         result,
         Err(Ok(FactoryError::PeriodSpendLimitExceeded.into()))
     );
+}
+
+// --- Request 1 & 2: get_owner / get_pauser query functions ---
+
+#[test]
+fn get_owner_returns_configured_owner() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    assert_eq!(factory.get_owner(), setup.owner);
+}
+
+#[test]
+fn get_pauser_returns_configured_pauser() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    assert_eq!(factory.get_pauser(), setup.pauser);
+}
+
+// --- Request 3: set_owner (owner transfer) ---
+
+#[test]
+fn set_owner_transfers_ownership() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_owner = Address::generate(&setup.env);
+
+    factory.set_owner(&new_owner);
+    assert_eq!(factory.get_owner(), new_owner);
+}
+
+#[test]
+fn set_owner_emits_owner_updated_event() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_owner = Address::generate(&setup.env);
+
+    factory
+        .mock_auths(&[
+            MockAuth {
+                address: &setup.owner,
+                invoke: &MockAuthInvoke {
+                    contract: &setup.factory_address,
+                    fn_name: "set_owner",
+                    args: (&new_owner,).into_val(&setup.env),
+                    sub_invokes: &[],
+                },
+            },
+            MockAuth {
+                address: &new_owner,
+                invoke: &MockAuthInvoke {
+                    contract: &setup.factory_address,
+                    fn_name: "set_owner",
+                    args: (&new_owner,).into_val(&setup.env),
+                    sub_invokes: &[],
+                },
+            },
+        ])
+        .set_owner(&new_owner);
+
+    let expected_event = OwnerUpdated {
+        old_owner: setup.owner.clone(),
+        new_owner: new_owner.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn set_owner_auth_is_enforced() {
+    let setup = TestContext::for_auth();
+    let attacker = Address::generate(&setup.env);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let unauthorized = factory
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "set_owner",
+                args: (&attacker,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_owner(&attacker);
+    assert!(unauthorized.is_err());
+    assert_eq!(factory.get_owner(), setup.owner);
+}
+
+#[test]
+fn set_owner_requires_new_owner_auth() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_owner = Address::generate(&setup.env);
+
+    // Only the current owner signs; new_owner does not co-authorize.
+    let result = factory
+        .mock_auths(&[MockAuth {
+            address: &setup.owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "set_owner",
+                args: (&new_owner,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_owner(&new_owner);
+    assert!(result.is_err());
+    assert_eq!(factory.get_owner(), setup.owner);
+}
+
+#[test]
+fn set_owner_works_when_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_owner = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    factory.set_owner(&new_owner);
+    assert_eq!(factory.get_owner(), new_owner);
+}
+
+#[test]
+fn new_owner_can_exercise_owner_functions_after_transfer() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_owner = Address::generate(&setup.env);
+    let destination = Address::generate(&setup.env);
+
+    factory
+        .mock_auths(&[
+            MockAuth {
+                address: &setup.owner,
+                invoke: &MockAuthInvoke {
+                    contract: &setup.factory_address,
+                    fn_name: "set_owner",
+                    args: (&new_owner,).into_val(&setup.env),
+                    sub_invokes: &[],
+                },
+            },
+            MockAuth {
+                address: &new_owner,
+                invoke: &MockAuthInvoke {
+                    contract: &setup.factory_address,
+                    fn_name: "set_owner",
+                    args: (&new_owner,).into_val(&setup.env),
+                    sub_invokes: &[],
+                },
+            },
+        ])
+        .set_owner(&new_owner);
+
+    // New owner can update destinations.
+    factory
+        .mock_auths(&[MockAuth {
+            address: &new_owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "update_issuer_destination",
+                args: (&setup.issuer_id, &destination, &true).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .update_issuer_destination(&setup.issuer_id, &destination, &true);
+
+    // Old owner is rejected.
+    let old_owner_rejected = factory
+        .mock_auths(&[MockAuth {
+            address: &setup.owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "update_issuer_destination",
+                args: (&setup.issuer_id, &destination, &false).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_update_issuer_destination(&setup.issuer_id, &destination, &false);
+    assert!(old_owner_rejected.is_err());
+}
+
+// --- Request 4: set_pauser_by_owner / set_pauser_by_pauser (pauser rotation paths) ---
+
+#[test]
+fn set_pauser_by_owner_transfers_pauser_role() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_pauser = Address::generate(&setup.env);
+
+    factory.set_pauser_by_owner(&new_pauser);
+    assert_eq!(factory.get_pauser(), new_pauser);
+}
+
+#[test]
+fn set_pauser_by_pauser_transfers_pauser_role() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_pauser = Address::generate(&setup.env);
+
+    factory.set_pauser_by_pauser(&new_pauser);
+    assert_eq!(factory.get_pauser(), new_pauser);
+}
+
+#[test]
+fn set_pauser_emits_pauser_updated_event() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_pauser = Address::generate(&setup.env);
+
+    factory
+        .mock_auths(&[MockAuth {
+            address: &setup.owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "set_pauser_by_owner",
+                args: (&new_pauser,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .set_pauser_by_owner(&new_pauser);
+
+    let expected_event = PauserUpdated {
+        old_pauser: setup.pauser.clone(),
+        new_pauser: new_pauser.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn set_pauser_by_owner_rejects_unauthorized_caller() {
+    let setup = TestContext::for_auth();
+    let attacker = Address::generate(&setup.env);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let unauthorized = factory
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "set_pauser_by_owner",
+                args: (&attacker,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_pauser_by_owner(&attacker);
+    assert!(unauthorized.is_err());
+    assert_eq!(factory.get_pauser(), setup.pauser);
+}
+
+#[test]
+fn set_pauser_by_pauser_rejects_unauthorized_caller() {
+    let setup = TestContext::for_auth();
+    let attacker = Address::generate(&setup.env);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let unauthorized = factory
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "set_pauser_by_pauser",
+                args: (&attacker,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_pauser_by_pauser(&attacker);
+    assert!(unauthorized.is_err());
+    assert_eq!(factory.get_pauser(), setup.pauser);
+}
+
+#[test]
+fn set_pauser_by_owner_works_when_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_pauser = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    // Owner can rotate pauser even while paused — critical recovery path.
+    factory.set_pauser_by_owner(&new_pauser);
+    assert_eq!(factory.get_pauser(), new_pauser);
+}
+
+#[test]
+fn set_pauser_by_pauser_blocked_when_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_pauser = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    // Pauser cannot rotate themselves while paused.
+    let result = factory.try_set_pauser_by_pauser(&new_pauser);
+    assert_eq!(result, Err(Ok(FactoryError::EnforcedPause.into())));
+    assert_eq!(factory.get_pauser(), setup.pauser);
+}
+
+#[test]
+fn owner_recovers_from_compromised_pauser() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let recovery_pauser = Address::generate(&setup.env);
+
+    // Compromised pauser freezes the contract.
+    factory.pause();
+    assert!(factory.paused());
+
+    // Owner rotates pauser even though contract is paused.
+    factory.set_pauser_by_owner(&recovery_pauser);
+    assert_eq!(factory.get_pauser(), recovery_pauser);
+
+    // Old (compromised) pauser can no longer unpause.
+    // Note: in for_flow mode, mock_all_auths is on, so we verify via get_pauser
+    // that the role has changed.
+}
+
+#[test]
+fn new_pauser_can_pause_and_unpause_after_rotation() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_pauser = Address::generate(&setup.env);
+
+    // Owner rotates pauser.
+    factory
+        .mock_auths(&[MockAuth {
+            address: &setup.owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "set_pauser_by_owner",
+                args: (&new_pauser,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .set_pauser_by_owner(&new_pauser);
+
+    // New pauser can pause.
+    factory
+        .mock_auths(&[MockAuth {
+            address: &new_pauser,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "pause",
+                args: ().into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .pause();
+    assert!(factory.paused());
+
+    // Old pauser is rejected.
+    let old_pauser_rejected = factory
+        .mock_auths(&[MockAuth {
+            address: &setup.pauser,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "unpause",
+                args: ().into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_unpause();
+    assert!(old_pauser_rejected.is_err());
+
+    // New pauser can unpause.
+    factory
+        .mock_auths(&[MockAuth {
+            address: &new_pauser,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "unpause",
+                args: ().into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .unpause();
+    assert!(!factory.paused());
+}
+
+// --- Request 5: upgrade (contract upgradeability) ---
+
+#[test]
+fn upgrade_requires_owner_auth() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let attacker = Address::generate(&setup.env);
+    let fake_hash = rand_bytes(&setup.env);
+
+    let unauthorized = factory
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "upgrade",
+                args: (&fake_hash,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_upgrade(&fake_hash);
+    assert!(unauthorized.is_err());
+}
+
+#[test]
+fn upgrade_emits_contract_upgraded_event() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_wasm_hash = upload_issuer_wasm(&setup.env);
+
+    factory
+        .mock_auths(&[MockAuth {
+            address: &setup.owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "upgrade",
+                args: (&new_wasm_hash,).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .upgrade(&new_wasm_hash);
+
+    let expected_event = ContractUpgraded {
+        new_wasm_hash: new_wasm_hash.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn upgrade_issuer_requires_owner_auth() {
+    let setup = TestContext::for_auth();
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let attacker = Address::generate(&setup.env);
+    let fake_hash = rand_bytes(&setup.env);
+
+    let unauthorized = factory
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "upgrade_issuer",
+                args: (&setup.issuer_id, &setup.token_address, &fake_hash).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_upgrade_issuer(&setup.issuer_id, &setup.token_address, &fake_hash);
+    assert!(unauthorized.is_err());
+}
+
+#[test]
+fn upgrade_issuer_fails_for_unknown_issuer() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let unknown_issuer = rand_bytes(&setup.env);
+    let fake_hash = rand_bytes(&setup.env);
+
+    let result = factory.try_upgrade_issuer(&unknown_issuer, &setup.token_address, &fake_hash);
+    assert_eq!(result, Err(Ok(FactoryError::IssuerNotFound.into())));
+}
+
+#[test]
+fn upgrade_issuer_succeeds_with_valid_wasm() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    // Re-upload the same issuer WASM to get a valid hash.
+    let new_issuer_hash = upload_issuer_wasm(&setup.env);
+
+    // upgrade_issuer should succeed — factory authorizes issuer.upgrade().
+    factory.upgrade_issuer(&setup.issuer_id, &setup.token_address, &new_issuer_hash);
+}
+
+#[test]
+fn upgrade_issuer_emits_issuer_upgraded_event() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_wasm_hash = upload_issuer_wasm(&setup.env);
+
+    factory
+        .mock_auths(&[MockAuth {
+            address: &setup.owner,
+            invoke: &MockAuthInvoke {
+                contract: &setup.factory_address,
+                fn_name: "upgrade_issuer",
+                args: (&setup.issuer_id, &setup.token_address, &new_wasm_hash).into_val(&setup.env),
+                sub_invokes: &[],
+            },
+        }])
+        .upgrade_issuer(&setup.issuer_id, &setup.token_address, &new_wasm_hash);
+
+    let expected_event = IssuerUpgraded {
+        issuer_id: setup.issuer_id.clone(),
+        token: setup.token_address.clone(),
+        new_wasm_hash: new_wasm_hash.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
 }
 
 proptest! {

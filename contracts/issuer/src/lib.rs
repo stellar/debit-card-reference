@@ -12,7 +12,7 @@
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env};
 
 #[contract]
 pub struct Issuer;
@@ -23,6 +23,15 @@ pub struct Issuer;
 pub enum DataKey {
     /// Factory contract address authorized to trigger transfers.
     Factory,
+}
+
+fn require_factory_auth(env: &Env) {
+    let factory: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Factory)
+        .expect("factory not set");
+    factory.require_auth();
 }
 
 #[contractimpl]
@@ -57,12 +66,7 @@ impl Issuer {
         destination: Address,
         amount: i128,
     ) {
-        let factory: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Factory)
-            .expect("factory not set");
-        factory.require_auth();
+        require_factory_auth(&env);
 
         token::TokenClient::new(&env, &token).transfer_from(
             &env.current_contract_address(),
@@ -70,5 +74,19 @@ impl Issuer {
             &destination,
             &amount,
         );
+    }
+
+    /// Replaces this contract's WASM bytecode in-place.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_wasm_hash` - Hash of the uploaded WASM to install.
+    ///
+    /// # Authorization
+    /// Requires authorization from the stored factory address.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        require_factory_auth(&env);
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }

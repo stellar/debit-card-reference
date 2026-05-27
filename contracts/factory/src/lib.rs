@@ -17,8 +17,8 @@ mod test;
 mod velocity;
 
 use crate::events::{
-    DebitorUpdated, DestinationUpdated, IssuerCreated, ManagedUpdated, TransferExecuted,
-    UserVelocityUpdated,
+    ContractUpgraded, DebitorUpdated, DestinationUpdated, IssuerCreated, IssuerUpgraded,
+    ManagedUpdated, OwnerUpdated, PauserUpdated, TransferExecuted, UserVelocityUpdated,
 };
 use pausable::{require_not_paused, Pausable};
 use soroban_sdk::{
@@ -29,7 +29,7 @@ use storage::{
     authorized_debitor, is_allowed_destination, issuer_address, issuer_manager, issuer_wasm_hash,
     owner, pauser, remove_allowed_destination, remove_authorized_debitor, set_allowed_destination,
     set_authorized_debitor, set_issuer_address, set_issuer_manager, set_issuer_wasm_hash,
-    set_owner, set_paused, set_pauser, user_velocity,
+    set_paused, user_velocity,
 };
 use velocity::{
     set_user_velocity_limits, validate_and_update_user_velocity, validate_velocity_config,
@@ -47,6 +47,7 @@ pub trait IssuerContract {
         destination: Address,
         amount: i128,
     );
+    fn upgrade(env: Env, new_wasm_hash: BytesN<32>);
 }
 
 #[contracterror]
@@ -110,8 +111,8 @@ impl Factory {
     /// # Authorization
     /// No runtime authorization check. This entrypoint is only callable at contract initialization.
     pub fn __constructor(env: Env, owner: Address, pauser: Address, issuer_wasm_hash: BytesN<32>) {
-        set_owner(&env, &owner);
-        set_pauser(&env, &pauser);
+        storage::set_owner(&env, &owner);
+        storage::set_pauser(&env, &pauser);
         set_paused(&env, false);
         set_issuer_wasm_hash(&env, &issuer_wasm_hash);
     }
@@ -454,6 +455,151 @@ impl Factory {
             period_duration_seconds,
             period_spend_limit,
             per_transaction_spend_limit,
+        }
+        .publish(&env);
+    }
+
+    /// Returns the current owner address.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    ///
+    /// # Authorization
+    /// No authorization required.
+    ///
+    /// # Returns
+    /// The current owner address.
+    pub fn get_owner(env: Env) -> Address {
+        owner(&env)
+    }
+
+    /// Returns the current pauser address.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    ///
+    /// # Authorization
+    /// No authorization required.
+    ///
+    /// # Returns
+    /// The current pauser address.
+    pub fn get_pauser(env: Env) -> Address {
+        pauser(&env)
+    }
+
+    /// Transfers ownership to a new address.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_owner` - Address to receive ownership.
+    ///
+    /// # Authorization
+    /// Requires authorization from both the current owner and the new owner.
+    /// The new-owner co-signature prevents accidental loss of ownership to an
+    /// unreachable address. Not gated by pause state.
+    pub fn set_owner(env: Env, new_owner: Address) {
+        let current_owner = owner(&env);
+        current_owner.require_auth();
+        new_owner.require_auth();
+
+        storage::set_owner(&env, &new_owner);
+
+        OwnerUpdated {
+            old_owner: current_owner,
+            new_owner,
+        }
+        .publish(&env);
+    }
+
+    /// Owner-driven pauser rotation. Bypasses the pause guard to recover from a compromised pauser.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_pauser` - Address to receive the pauser role.
+    ///
+    /// # Authorization
+    /// Requires authorization from the current owner. Not gated by pause state.
+    pub fn set_pauser_by_owner(env: Env, new_pauser: Address) {
+        owner(&env).require_auth();
+
+        let old_pauser = pauser(&env);
+        storage::set_pauser(&env, &new_pauser);
+
+        PauserUpdated {
+            old_pauser,
+            new_pauser,
+        }
+        .publish(&env);
+    }
+
+    /// Transfers the pauser role to a new address via the pauser self-rotation path.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_pauser` - Address to receive the pauser role.
+    ///
+    /// # Authorization
+    /// Requires authorization from the current pauser and a non-paused contract state.
+    pub fn set_pauser_by_pauser(env: Env, new_pauser: Address) {
+        require_not_paused(&env);
+        let old_pauser = pauser(&env);
+        old_pauser.require_auth();
+
+        storage::set_pauser(&env, &new_pauser);
+
+        PauserUpdated {
+            old_pauser,
+            new_pauser,
+        }
+        .publish(&env);
+    }
+
+    /// Replaces the factory contract's WASM bytecode.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `new_wasm_hash` - Hash of the uploaded WASM to install.
+    ///
+    /// # Authorization
+    /// Requires authorization from the current owner. Not gated by pause state.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        owner(&env).require_auth();
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        ContractUpgraded { new_wasm_hash }.publish(&env);
+    }
+
+    /// Upgrades an issuer contract's WASM bytecode.
+    ///
+    /// # Arguments
+    /// * `env` - Contract environment.
+    /// * `issuer_id` - Issuer identifier.
+    /// * `token` - Token address associated with the issuer.
+    /// * `new_wasm_hash` - Hash of the uploaded WASM to install on the issuer.
+    ///
+    /// # Authorization
+    /// Requires authorization from the current owner. Not gated by pause state.
+    pub fn upgrade_issuer(
+        env: Env,
+        issuer_id: BytesN<32>,
+        token: Address,
+        new_wasm_hash: BytesN<32>,
+    ) {
+        owner(&env).require_auth();
+
+        let Some(issuer_contract_address) = issuer_address(&env, &issuer_id, &token) else {
+            panic_with_error!(&env, FactoryError::IssuerNotFound);
+        };
+
+        let issuer = IssuerClient::new(&env, &issuer_contract_address);
+        issuer.upgrade(&new_wasm_hash);
+
+        IssuerUpgraded {
+            issuer_id,
+            token,
+            new_wasm_hash,
         }
         .publish(&env);
     }

@@ -87,3 +87,39 @@ pub struct UserVelocityUpdated {
     /// Max spend per transaction.
     pub per_transaction_spend_limit: i128,
 }
+
+#[contractevent]
+#[derive(Clone)]
+pub struct OwnerUpdated {
+    /// Previous owner address.
+    pub old_owner: Address,
+    /// New owner address.
+    pub new_owner: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct PauserUpdated {
+    /// Previous pauser address.
+    pub old_pauser: Address,
+    /// New pauser address.
+    pub new_pauser: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct ContractUpgraded {
+    /// New WASM hash applied to the contract.
+    pub new_wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct IssuerUpgraded {
+    /// Issuer identifier.
+    pub issuer_id: BytesN<32>,
+    /// Token address associated with the issuer.
+    pub token: Address,
+    /// New WASM hash applied to the issuer contract.
+    pub new_wasm_hash: BytesN<32>,
+}

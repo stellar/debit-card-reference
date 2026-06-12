@@ -69,6 +69,11 @@ Factory checks include:
 - contract is not paused
 - debitor is authorized and provides signature
 - destination is allowlisted for issuer
+- `uuid` was not already used for this `(issuer_id, token)` within the
+  deduplication window (~7 days, `TRANSFER_UUID_TTL_LEDGERS`), so resubmitting
+  the same authorization cannot double-charge the cardholder. Deployers must
+  size this window to their offchain processor's maximum retry horizon; once
+  the entry expires the same `uuid` is accepted again
 - issuer exists for `(issuer_id, token)`
 - velocity constraints pass:
   positive amount, per-transaction limit, rolling-period limit,

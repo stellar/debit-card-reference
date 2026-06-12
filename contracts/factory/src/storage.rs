@@ -60,6 +60,23 @@ pub enum PersistentKey {
     UserVelocity(BytesN<32>, Address, Address),
 }
 
+/// Number of ledgers a consumed transfer `uuid` is retained for deduplication
+/// (~7 days at 5 second ledgers). Must cover the offchain processor's maximum
+/// retry window: once the entry expires, the same `uuid` is accepted again.
+pub const TRANSFER_UUID_TTL_LEDGERS: u32 = 120_960;
+
+/// Temporary-storage keys for short-lived deduplication state.
+#[contracttype]
+pub enum TemporaryKey {
+    /// Consumed transfer uuid marker for a given issuer and token pair.
+    ///
+    /// Tuple fields:
+    /// 1. `issuer_id`
+    /// 2. `token`
+    /// 3. `uuid`
+    UsedTransferUuid(BytesN<32>, Address, BytesN<32>),
+}
+
 // Global config
 pub fn set_owner(env: &Env, owner: &Address) {
     env.storage().instance().set(&ConfigKey::Owner, owner);
@@ -167,6 +184,32 @@ pub fn set_authorized_debitor(env: &Env, issuer_id: &BytesN<32>, debitor: &Addre
 pub fn remove_authorized_debitor(env: &Env, issuer_id: &BytesN<32>, debitor: &Address) {
     let key = PersistentKey::AuthorizedDebitor(issuer_id.clone(), debitor.clone());
     env.storage().persistent().remove(&key);
+}
+
+// Transfer uuid deduplication
+pub fn is_transfer_uuid_used(
+    env: &Env,
+    issuer_id: &BytesN<32>,
+    token: &Address,
+    uuid: &BytesN<32>,
+) -> bool {
+    let key = TemporaryKey::UsedTransferUuid(issuer_id.clone(), token.clone(), uuid.clone());
+    env.storage().temporary().has(&key)
+}
+
+pub fn mark_transfer_uuid_used(
+    env: &Env,
+    issuer_id: &BytesN<32>,
+    token: &Address,
+    uuid: &BytesN<32>,
+) {
+    let key = TemporaryKey::UsedTransferUuid(issuer_id.clone(), token.clone(), uuid.clone());
+    env.storage().temporary().set(&key, &());
+    env.storage().temporary().extend_ttl(
+        &key,
+        TRANSFER_UUID_TTL_LEDGERS,
+        TRANSFER_UUID_TTL_LEDGERS,
+    );
 }
 
 // User velocity state

@@ -8,7 +8,7 @@ use super::{
         ContractUpgraded, IssuerUpgraded, ManagedUpdated, OwnerUpdated, PauserUpdated,
         UserVelocityUpdated,
     },
-    storage::set_user_velocity,
+    storage::{set_user_velocity, TRANSFER_UUID_TTL_LEDGERS},
     Factory, FactoryClient, FactoryError, UserVelocity,
 };
 use proptest::prelude::*;
@@ -1014,6 +1014,148 @@ fn velocity_overflow_maps_to_period_limit_error() {
         result,
         Err(Ok(FactoryError::PeriodSpendLimitExceeded.into()))
     );
+}
+
+// --- FIND-003: transfer uuid replay protection ---
+
+#[test]
+fn transfer_rejects_reused_uuid_in_later_ledger() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let token = TokenClient::new(&setup.env, &setup.token_address);
+    let uuid = rand_bytes(&setup.env);
+
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &uuid,
+    );
+
+    // Next ledger, so the replay cannot be caught by one-transfer-per-ledger.
+    let sequence = setup.env.ledger().sequence();
+    setup.env.ledger().set_sequence_number(sequence + 1);
+
+    let replay = factory.try_transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &uuid,
+    );
+    assert_eq!(replay, Err(Ok(FactoryError::UuidAlreadyUsed.into())));
+    assert_eq!(token.balance(&setup.destination), AMOUNT);
+    assert_eq!(token.balance(&setup.user_account), INITIAL_BALANCE - AMOUNT);
+}
+
+#[test]
+fn same_uuid_is_accepted_for_a_different_token_scope() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let uuid = rand_bytes(&setup.env);
+
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &uuid,
+    );
+
+    let sac = setup
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&setup.env));
+    let second_token_address = sac.address();
+    let second_token = TokenClient::new(&setup.env, &second_token_address);
+    let second_token_admin = StellarAssetClient::new(&setup.env, &second_token_address);
+
+    let second_issuer = factory.create_issuer(
+        &setup.issuer_id,
+        &second_token_address,
+        &setup.manager,
+        &setup.destination,
+    );
+    factory.update_user_velocity(
+        &setup.issuer_id,
+        &second_token_address,
+        &setup.user_account,
+        &3600,
+        &(INITIAL_BALANCE * 10),
+        &(INITIAL_BALANCE * 10),
+    );
+    second_token_admin.mint(&setup.user_account, &INITIAL_BALANCE);
+    second_token.approve(
+        &setup.user_account,
+        &second_issuer,
+        &INITIAL_BALANCE,
+        &(setup.env.ledger().sequence() + 1000),
+    );
+
+    // The dedup scope is (issuer_id, token): the same uuid under another
+    // token is a distinct offchain authorization stream.
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &second_token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &uuid,
+    );
+
+    assert_eq!(second_token.balance(&setup.destination), AMOUNT);
+}
+
+#[test]
+fn uuid_becomes_reusable_after_dedup_window_expires() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let token = TokenClient::new(&setup.env, &setup.token_address);
+    let uuid = rand_bytes(&setup.env);
+
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &uuid,
+    );
+
+    // Jump past the dedup TTL: the temporary entry expires and the uuid is
+    // accepted again as a new authorization.
+    let sequence = setup.env.ledger().sequence();
+    setup
+        .env
+        .ledger()
+        .set_sequence_number(sequence + TRANSFER_UUID_TTL_LEDGERS + 1);
+
+    // Refresh the token allowance, which expired with the ledger jump.
+    token.approve(
+        &setup.user_account,
+        &setup.issuer_address,
+        &INITIAL_BALANCE,
+        &(setup.env.ledger().sequence() + 1000),
+    );
+
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &uuid,
+    );
+    assert_eq!(token.balance(&setup.destination), 2 * AMOUNT);
 }
 
 // --- Request 1 & 2: get_owner / get_pauser query functions ---

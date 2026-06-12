@@ -26,8 +26,9 @@ use soroban_sdk::{
     xdr::ToXdr, Address, BytesN, Env,
 };
 use storage::{
-    authorized_debitor, is_allowed_destination, issuer_address, issuer_manager, issuer_wasm_hash,
-    owner, pauser, remove_allowed_destination, remove_authorized_debitor, set_allowed_destination,
+    authorized_debitor, is_allowed_destination, is_transfer_uuid_used, issuer_address,
+    issuer_manager, issuer_wasm_hash, mark_transfer_uuid_used, owner, pauser,
+    remove_allowed_destination, remove_authorized_debitor, set_allowed_destination,
     set_authorized_debitor, set_issuer_address, set_issuer_manager, set_issuer_wasm_hash,
     set_paused, user_velocity,
 };
@@ -73,6 +74,8 @@ pub enum FactoryError {
     IssuerManagerNotFound = 8,
     /// Issuer for the `(issuer_id, token)` pair already exists.
     IssuerAlreadyExists = 9,
+    /// Transfer `uuid` was already used for this `(issuer_id, token)` scope.
+    UuidAlreadyUsed = 10,
     /// Operation requires the contract to be unpaused.
     EnforcedPause = 1000,
     /// Operation requires the contract to be paused.
@@ -301,6 +304,10 @@ impl Factory {
     /// * `amount` - Transfer amount.
     /// * `destination` - Destination address that must be allowlisted.
     /// * `uuid` - Offchain transfer correlation identifier emitted in events.
+    ///   Each `uuid` is consumed on success and rejected with `UuidAlreadyUsed`
+    ///   if reused for the same `(issuer_id, token)` within
+    ///   `TRANSFER_UUID_TTL_LEDGERS` ledgers, making retries of the same
+    ///   offchain authorization idempotent.
     ///
     /// # Authorization
     /// Requires a non-paused contract state and authentication for an authorized debitor.
@@ -323,6 +330,14 @@ impl Factory {
         if !is_allowed_destination(&env, &issuer_id, &destination) {
             panic_with_error!(&env, FactoryError::NotAuthorizedDestination);
         }
+        // Reject replays of an already-settled offchain authorization before
+        // any velocity accounting or fund movement. Marking the uuid here is
+        // safe: a panic anywhere below reverts this write with the rest of
+        // the transaction.
+        if is_transfer_uuid_used(&env, &issuer_id, &token, &uuid) {
+            panic_with_error!(&env, FactoryError::UuidAlreadyUsed);
+        }
+        mark_transfer_uuid_used(&env, &issuer_id, &token, &uuid);
         validate_and_update_user_velocity(&env, &issuer_id, &token, &account, amount);
 
         let Some(issuer_contract_address) = issuer_address(&env, &issuer_id, &token) else {

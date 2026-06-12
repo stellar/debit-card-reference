@@ -39,6 +39,61 @@ wallets approve that issuer contract as spender.
 - `cardholder`:
   wallet owner whose account is debited after approving the issuer contract.
 
+## Trust Model And Privileged Roles
+
+The `owner` is the system's root of trust. By design, and without any code
+upgrade or cardholder action, the owner can reach every guardrail that
+constrains how an allowance is spent:
+
+- it can reassign a per-issuer `manager` to itself (`set_authorized_manager`),
+  and as that manager authorize itself as a `debitor`
+  (`update_authorized_debitor`) and raise velocity limits
+  (`update_user_velocity`);
+- it can allowlist a destination it controls (`update_issuer_destination`, or
+  the `destination` argument of `create_issuer`);
+- it can then call `transfer_to_destination` to pull from any account holding a
+  live allowance to the issuer contract, up to that allowance.
+
+The owner can also replace the factory's or any issuer's bytecode in place
+(`upgrade`, `upgrade_issuer`). `upgrade_issuer` preserves the issuer contract's
+address, and the cardholder's SEP-41 allowance is keyed by
+`(from, spender = issuer_address)`, so every existing allowance remains
+spendable by the replacement code with no cardholder action. The upgrade paths
+are intentionally not gated by the pause flag — the owner must be able to ship a
+fix while the contract is frozen — so a pauser freeze does not constrain the
+owner.
+
+This concentration of authority is inherent to a non-custodial pull-payment
+model: the allowance exists precisely so the card operator can debit the wallet
+when a card is swiped, and the owner key is that operator. The role split
+(owner / manager / debitor) bounds the blast radius of a *manager* or *debitor*
+key compromise; it is not a trust boundary against the owner.
+
+A cardholder's exposure is always bounded by their token allowance amount and
+its `expiration_ledger`, and can be removed at any time by re-approving `0` or
+letting the allowance expire.
+
+### Deployment Guidance
+
+1. Set `owner` to an address with shared control, not a single key. This can be
+   a Stellar account configured with multiple signers and a high signing
+   threshold, or a contract address that enforces its own governance (for
+   example a multisig or timelock contract). Consider using a separate upgrade
+   authority and/or a timelock for `upgrade` and `upgrade_issuer`, so role and
+   code changes are observable on-chain before they take effect.
+2. Keep per-user velocity limits low and instruct wallets to grant small,
+   short-lived allowances, so the bounded exposure of any owner action or key
+   compromise stays within an acceptable loss.
+3. Every role change and upgrade emits an event (`OwnerUpdated`,
+   `PauserUpdated`, `ManagedUpdated`, `DebitorUpdated`, `DestinationUpdated`,
+   `UserVelocityUpdated`, `ContractUpgraded`, `IssuerUpgraded`). Monitor these
+   and alert on any change that did not originate from an expected operator
+   action.
+
+Pause does not constrain the owner: the upgrade paths are not pause-gated, and
+the owner can rotate roles and execute transfers through the paths above
+regardless of who holds the pauser role.
+
 ## Expected Setup Flow
 
 1. Deploy `issuer` Wasm and get its hash.

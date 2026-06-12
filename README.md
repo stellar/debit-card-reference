@@ -73,6 +73,44 @@ A cardholder's exposure is always bounded by their token allowance amount and
 its `expiration_ledger`, and can be removed at any time by re-approving `0` or
 letting the allowance expire.
 
+### Debitor Key Compromise
+
+The `debitor` is the largest operational attack surface in a running deployment:
+it is the internet-facing hot key a payments backend signs with on every card
+swipe. `transfer_to_destination` authenticates only that debitor. The debited
+`account` is a parameter chosen by the debitor — the cardholder consents once,
+up front, through the token allowance, and does not sign each debit. This is
+inherent to the card flow: at swipe time the cardholder cannot produce a
+signature inside the card network's authorization window. Debitor authorization
+is keyed by `issuer_id` alone (`AuthorizedDebitor(issuer_id, debitor)`), so a
+single authorized debitor key is valid across every token under that issuer.
+
+A compromised debitor key can therefore attempt debits against every account
+holding a live allowance to that issuer's contracts, across all of the issuer's
+tokens, with no cardholder action — the blast radius is the issuer's entire
+enrolled user base. Four controls bound that blast radius:
+
+1. The debitor cannot administer policy. It cannot allowlist a payout address
+   (`update_issuer_destination` is owner-only) and it cannot raise velocity
+   limits (`update_user_velocity` is manager-only). Funds only ever settle to a
+   destination the owner allowlisted, so direct theft requires a colluding or
+   attacker-controlled allowlisted destination; absent that, the damage is
+   forced payments to *legitimate* destinations, which the operator can reverse
+   off-chain. This separation of duties is the one hard on-chain bound.
+2. Per-account drain is rate-limited. The per-transaction cap, the
+   rolling-period cap, and the one-transfer-per-ledger guard
+   (`validate_and_update_user_velocity`) cap how fast any single cardholder can
+   be drained.
+3. Each debit is bounded by the cardholder's allowance amount and its
+   `expiration_ledger`. No debit can exceed the approved amount, and the
+   exposure ends when the allowance expires or is re-approved to `0`.
+4. Incident response. The `pauser` can freeze *all* transfers globally, and the
+   `manager` can revoke the key with `update_authorized_debitor`. These are
+   alternative levers, not simultaneous ones: `update_authorized_debitor` is
+   itself pause-gated, so revocation requires a non-paused contract. Freeze
+   first to stop the bleeding (then unpause to revoke), or revoke the key first
+   and pause only if broader containment is needed.
+
 ### Deployment Guidance
 
 1. Set `owner` to an address with shared control, not a single key. This can be
@@ -89,6 +127,14 @@ letting the allowance expire.
    `UserVelocityUpdated`, `ContractUpgraded`, `IssuerUpgraded`). Monitor these
    and alert on any change that did not originate from an expected operator
    action.
+4. Treat the debitor as a least-privilege, frequently rotated hot key: give it
+   no other role, rotate it on a schedule via `update_authorized_debitor`
+   (authorize the new key, then revoke the old), and keep each issuer's
+   destination allowlist as small as the settlement flow permits.
+5. Monitor `TransferExecuted` events for anomalies — volume spikes, many
+   distinct accounts debited in a short window, or off-hours activity — and wire
+   alerts into the pause and debitor-revocation incident path so a suspected key
+   compromise can be contained immediately.
 
 Pause does not constrain the owner: the upgrade paths are not pause-gated, and
 the owner can rotate roles and execute transfers through the paths above

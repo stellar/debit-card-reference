@@ -12,9 +12,30 @@ use soroban_sdk::{contractevent, Address, BytesN};
 
 #[contractevent]
 #[derive(Clone)]
+pub struct Paused {
+    /// Pauser address that paused the contract.
+    #[topic]
+    pub pauser: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct Unpaused {
+    /// Pauser address that unpaused the contract.
+    #[topic]
+    pub pauser: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
 pub struct IssuerCreated {
     /// Issuer identifier.
+    #[topic]
     pub issuer_id: BytesN<32>,
+    /// Token address associated with this issuer deployment (the unique
+    /// `(issuer_id, token)` key).
+    #[topic]
+    pub token: Address,
     /// Deployed issuer contract address.
     pub issuer: Address,
     /// Initial issuer manager.
@@ -27,9 +48,16 @@ pub struct IssuerCreated {
 #[derive(Clone)]
 pub struct TransferExecuted {
     /// Offchain transfer correlation identifier.
+    #[topic]
     pub uuid: BytesN<32>,
+    /// Issuer identifier whose policy scoped this transfer.
+    #[topic]
+    pub issuer_id: BytesN<32>,
     /// Debited source account.
+    #[topic]
     pub account: Address,
+    /// Authorized debitor that signed this transfer.
+    pub debitor: Address,
     /// Credited destination account.
     pub destination: Address,
     /// Token contract address.
@@ -42,8 +70,10 @@ pub struct TransferExecuted {
 #[derive(Clone)]
 pub struct DestinationUpdated {
     /// Issuer identifier.
+    #[topic]
     pub issuer_id: BytesN<32>,
     /// Destination address updated in the allowlist.
+    #[topic]
     pub destination: Address,
     /// `true` when added, `false` when removed.
     pub allowed: bool,
@@ -53,8 +83,10 @@ pub struct DestinationUpdated {
 #[derive(Clone)]
 pub struct DebitorUpdated {
     /// Issuer identifier.
+    #[topic]
     pub issuer_id: BytesN<32>,
     /// Debitor address that was updated.
+    #[topic]
     pub debitor: Address,
     /// `true` when authorized, `false` when revoked.
     pub authorized: bool,
@@ -64,21 +96,26 @@ pub struct DebitorUpdated {
 #[derive(Clone)]
 pub struct ManagedUpdated {
     /// Issuer identifier.
+    #[topic]
     pub issuer_id: BytesN<32>,
+    /// New manager address.
+    #[topic]
+    pub manager: Address,
     /// Previous manager address.
     pub old_manager: Address,
-    /// New manager address.
-    pub manager: Address,
 }
 
 #[contractevent]
 #[derive(Clone)]
 pub struct UserVelocityUpdated {
     /// Issuer identifier.
+    #[topic]
     pub issuer_id: BytesN<32>,
     /// Token address for velocity scope.
+    #[topic]
     pub token: Address,
     /// User address for velocity scope.
+    #[topic]
     pub user: Address,
     /// Rolling period length in seconds.
     pub period_duration_seconds: u64,
@@ -91,19 +128,21 @@ pub struct UserVelocityUpdated {
 #[contractevent]
 #[derive(Clone)]
 pub struct OwnerUpdated {
+    /// New owner address.
+    #[topic]
+    pub new_owner: Address,
     /// Previous owner address.
     pub old_owner: Address,
-    /// New owner address.
-    pub new_owner: Address,
 }
 
 #[contractevent]
 #[derive(Clone)]
 pub struct PauserUpdated {
+    /// New pauser address.
+    #[topic]
+    pub new_pauser: Address,
     /// Previous pauser address.
     pub old_pauser: Address,
-    /// New pauser address.
-    pub new_pauser: Address,
 }
 
 #[contractevent]
@@ -117,6 +156,7 @@ pub struct ContractUpgraded {
 #[derive(Clone)]
 pub struct IssuerUpgraded {
     /// Issuer identifier.
+    #[topic]
     pub issuer_id: BytesN<32>,
     /// Token address associated with the issuer.
     pub token: Address,

@@ -910,11 +910,122 @@ fn paused_state_blocks_mutating_entrypoints() {
     );
     assert_eq!(transfer, Err(Ok(FactoryError::EnforcedPause.into())));
 
+    // Manager rotation is owner-gated and authority-replacing: permitted while
+    // paused so the owner can rotate out a compromised manager during an incident
+    // (FIND-005 revoke-while-paused carve-out).
     let manager_rotation = factory.try_set_authorized_manager(&setup.issuer_id, &new_manager);
-    assert_eq!(
-        manager_rotation,
-        Err(Ok(FactoryError::EnforcedPause.into()))
+    assert_eq!(manager_rotation, Ok(Ok(())));
+    assert!(factory.is_authorized_manager(&setup.issuer_id, &new_manager));
+}
+
+// FIND-005 Part A — revoke-while-paused carve-out. Authority-reducing operations
+// (revoke debitor / remove destination / rotate manager) are permitted while paused
+// so an operator can freeze and surgically revoke at once; authority-adding
+// operations stay pause-gated.
+
+#[test]
+fn revoke_debitor_succeeds_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    assert!(factory.is_authorized_debitor(&setup.issuer_id, &setup.debitor));
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let revoke = factory.try_update_authorized_debitor(&setup.issuer_id, &setup.debitor, &false);
+    assert_eq!(revoke, Ok(Ok(())));
+    assert!(!factory.is_authorized_debitor(&setup.issuer_id, &setup.debitor));
+    assert!(factory.paused());
+}
+
+#[test]
+fn authorize_debitor_blocked_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_debitor = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let authorize = factory.try_update_authorized_debitor(&setup.issuer_id, &new_debitor, &true);
+    assert_eq!(authorize, Err(Ok(FactoryError::EnforcedPause.into())));
+    assert!(!factory.is_authorized_debitor(&setup.issuer_id, &new_debitor));
+}
+
+#[test]
+fn remove_destination_succeeds_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    assert!(factory.is_authorized_destination(&setup.issuer_id, &setup.destination));
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let remove =
+        factory.try_update_issuer_destination(&setup.issuer_id, &setup.destination, &false);
+    assert_eq!(remove, Ok(Ok(())));
+    assert!(!factory.is_authorized_destination(&setup.issuer_id, &setup.destination));
+    assert!(factory.paused());
+}
+
+#[test]
+fn add_destination_blocked_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_destination = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let add = factory.try_update_issuer_destination(&setup.issuer_id, &new_destination, &true);
+    assert_eq!(add, Err(Ok(FactoryError::EnforcedPause.into())));
+    assert!(!factory.is_authorized_destination(&setup.issuer_id, &new_destination));
+}
+
+#[test]
+fn rotate_manager_succeeds_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_manager = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let rotate = factory.try_set_authorized_manager(&setup.issuer_id, &new_manager);
+    assert_eq!(rotate, Ok(Ok(())));
+    assert!(factory.is_authorized_manager(&setup.issuer_id, &new_manager));
+    assert!(!factory.is_authorized_manager(&setup.issuer_id, &setup.manager));
+    assert!(factory.paused());
+}
+
+#[test]
+fn freeze_then_revoke_then_resume_incident_flow() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    // Freeze the system in response to a compromised debitor.
+    factory.pause();
+    assert!(factory.paused());
+
+    // Revoke the compromised debitor while still frozen — no transient re-open window.
+    let revoke = factory.try_update_authorized_debitor(&setup.issuer_id, &setup.debitor, &false);
+    assert_eq!(revoke, Ok(Ok(())));
+
+    // Resume normal operations.
+    factory.unpause();
+    assert!(!factory.paused());
+
+    // The revoked debitor cannot transfer after resume.
+    let transfer = factory.try_transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &1,
+        &setup.destination,
+        &rand_bytes(&setup.env),
     );
+    assert_eq!(transfer, Err(Ok(FactoryError::DebitorNotAuthorized.into())));
 }
 
 #[rstest]

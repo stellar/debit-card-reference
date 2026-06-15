@@ -266,17 +266,19 @@ impl Factory {
     /// * `allowed` - If `true`, add destination to allowlist; if `false`, remove it.
     ///
     /// # Authorization
-    /// Requires owner authorization and a non-paused contract state.
+    /// Requires owner authorization. Removing a destination (`allowed == false`)
+    /// is permitted while paused for incident response; adding a destination
+    /// (`allowed == true`) requires a non-paused contract state.
     pub fn update_issuer_destination(
         env: Env,
         issuer_id: BytesN<32>,
         destination: Address,
         allowed: bool,
     ) {
-        require_not_paused(&env);
         owner(&env).require_auth();
 
         if allowed {
+            require_not_paused(&env);
             set_allowed_destination(&env, &issuer_id, &destination);
         } else {
             remove_allowed_destination(&env, &issuer_id, &destination);
@@ -351,20 +353,22 @@ impl Factory {
     /// * `authorized` - If `true`, authorize debitor; if `false`, revoke authorization.
     ///
     /// # Authorization
-    /// Requires issuer-manager authorization and a non-paused contract state.
+    /// Requires issuer-manager authorization. Revoking a debitor (`authorized == false`)
+    /// is permitted while paused for incident response; authorizing a debitor
+    /// (`authorized == true`) requires a non-paused contract state.
     pub fn update_authorized_debitor(
         env: Env,
         issuer_id: BytesN<32>,
         debitor: Address,
         authorized: bool,
     ) {
-        require_not_paused(&env);
         let Some(manager) = issuer_manager(&env, &issuer_id) else {
             panic_with_error!(&env, FactoryError::IssuerManagerNotFound);
         };
         manager.require_auth();
 
         if authorized {
+            require_not_paused(&env);
             set_authorized_debitor(&env, &issuer_id, &debitor);
         } else {
             remove_authorized_debitor(&env, &issuer_id, &debitor);
@@ -386,9 +390,10 @@ impl Factory {
     /// * `manager` - New manager address for issuer-scoped operations.
     ///
     /// # Authorization
-    /// Requires owner authorization and a non-paused contract state.
+    /// Requires owner authorization. Manager rotation is authority-replacing and
+    /// owner-gated, so it is permitted while paused for incident response (e.g. to
+    /// rotate out a compromised manager without first unpausing).
     pub fn set_authorized_manager(env: Env, issuer_id: BytesN<32>, manager: Address) {
-        require_not_paused(&env);
         owner(&env).require_auth();
 
         let Some(old_manager) = issuer_manager(&env, &issuer_id) else {

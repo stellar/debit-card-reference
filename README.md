@@ -188,3 +188,24 @@ sources:
   `https://github.com/withbridge/bridge-cards`
 
 See `THIRD_PARTY_NOTICES.md` for additional attribution details.
+
+## Development And CI
+
+The Rust toolchain is pinned by `rust-toolchain.toml` at the repo root
+(`rustup` honors it automatically); install it locally with
+`rustup toolchain install 1.92.0`. CI treats this file as the source of truth
+and only falls back to the optional `RUST_TOOLCHAIN` repository variable as a
+break-glass override.
+
+CI (`.github/workflows/contract_build.yml`) builds both Wasm artifacts — the
+issuer via `make build` and the deployable factory via `make -C factory build`
+(`stellar contract build`, using a pinned Stellar CLI) — and asserts the
+factory artifact exists. It then runs `cargo fmt --check`, strict Clippy,
+`cargo audit`, and the full test suite (`make test`).
+
+Property tests honor a `PROPTEST_CASES` environment variable (defaulting to 32
+locally and 256 in CI via the `PROPTEST_CASES` repository variable); run deeper
+fuzzing locally with, e.g., `PROPTEST_CASES=1024 make test`. A `cargo deny`
+supply-chain check (`deny.toml`) also runs in CI — advisories are non-blocking,
+while licenses, bans, and sources are a hard gate — alongside a report-only
+coverage job (`cargo llvm-cov`).

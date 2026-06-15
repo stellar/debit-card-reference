@@ -177,6 +177,58 @@ safer path.
    require `amount + margin` in token base units at authorization time, not
    exact amount. This filters approvals that are likely to fail at inclusion.
 
+## Velocity Configuration
+
+`update_user_velocity` is manager-only and validated by
+`validate_velocity_config`. Keep these properties in mind when configuring a
+cardholder:
+
+1. Cross-field invariant:
+   `per_transaction_spend_limit` must not exceed `period_spend_limit`. A config
+   that violates this is rejected with `InvalidVelocityConfig`; without the
+   check the effective single-transfer ceiling silently collapses to
+   `min(per_transaction_spend_limit, period_spend_limit)`.
+1. Minimum period duration:
+   `period_duration_seconds` must be at least `MIN_PERIOD_DURATION_SECONDS`
+   (one hour). A shorter window resets on nearly every ledger, degrading the
+   period cap to a per-ledger cap. There is no upper bound: a very large
+   duration is an intentional "effectively never resets" configuration that
+   some operators may want, and it is visible via `get_user_velocity`.
+1. Disabling a cardholder:
+   there is no explicit suspend flag. A user with `per_transaction_spend_limit`
+   of `0` (which the cross-field rule forces when `period_spend_limit` is `0`)
+   cannot transfer at all, so `period_spend_limit = 0` is the documented freeze
+   idiom. The all-zero default also means an unconfigured user is frozen until
+   the manager sets limits. To revoke spending entirely, prefer
+   `update_authorized_debitor(..., authorized = false)`.
+
+## Issuer Upgrade Safety
+
+`upgrade_issuer` (and the factory's own `upgrade`) install any 32-byte WASM hash
+the owner supplies, with no on-chain verification that the hash is a valid,
+working contract. A hash for WASM that has not been uploaded fails safely: the
+host traps and the whole transaction reverts, leaving the issuer unchanged. The
+unsafe case is a wrong-but-uploaded hash: it installs successfully, and if the
+new code lacks a working factory-authorized `upgrade` entrypoint the issuer can
+never be upgraded again. Recovery is not possible for that `(issuer_id, token)`
+pair — `create_issuer` rejects it with `IssuerAlreadyExists`, and the
+deterministic deployer salt `sha256(issuer_id, token)` collides on any redeploy,
+so re-onboarding requires a new `issuer_id` and forces every cardholder to
+re-approve a new issuer contract as their SEP-41 spender. This residual risk is
+consistent with the owner's accepted authority to install arbitrary issuer code.
+
+Follow this runbook for every issuer upgrade:
+
+1. Upload the new WASM with `stellar contract upload` and record the returned
+   hash.
+1. Deploy that exact WASM to a throwaway contract on the same network and verify
+   it exposes a working factory-authorized `upgrade` entrypoint (the fixture in
+   `contracts/issuer-upgrade-fixture` exists for this purpose).
+1. Only then call `upgrade_issuer` with the verified hash.
+1. Treat a bad target hash as unrecoverable for that `(issuer_id, token)` pair:
+   plan upgrades during a maintenance window and double-check the hash against
+   step 1 before submitting.
+
 ## Acknowledgments
 
 Portions of this implementation were adapted from Bridge Ventures / withbridge

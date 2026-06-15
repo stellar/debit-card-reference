@@ -15,13 +15,22 @@ use crate::{
     FactoryError,
 };
 
+/// Minimum accepted `period_duration_seconds`. A window shorter than this
+/// resets on (almost) every ledger, collapsing the period cap to a per-ledger
+/// cap; one hour keeps the period limit a meaningful aggregate control.
+pub const MIN_PERIOD_DURATION_SECONDS: u64 = 3600;
+
 pub fn validate_velocity_config(
     env: &Env,
     period_duration_seconds: u64,
     period_spend_limit: i128,
     per_transaction_spend_limit: i128,
 ) {
-    if period_duration_seconds == 0 || period_spend_limit < 0 || per_transaction_spend_limit < 0 {
+    if period_duration_seconds < MIN_PERIOD_DURATION_SECONDS
+        || period_spend_limit < 0
+        || per_transaction_spend_limit < 0
+        || per_transaction_spend_limit > period_spend_limit
+    {
         panic_with_error!(env, FactoryError::InvalidVelocityConfig);
     }
 }

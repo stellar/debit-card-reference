@@ -5,8 +5,8 @@ extern crate std;
 
 use super::{
     events::{
-        ContractUpgraded, IssuerUpgraded, ManagedUpdated, OwnerUpdated, PauserUpdated,
-        UserVelocityUpdated,
+        ContractUpgraded, IssuerCreated, IssuerUpgraded, ManagedUpdated, OwnerUpdated, Paused,
+        PauserUpdated, TransferExecuted, Unpaused, UserVelocityUpdated,
     },
     storage::{set_user_velocity, PersistentKey},
     Factory, FactoryClient, FactoryError, UserVelocity,
@@ -1641,6 +1641,118 @@ fn upgrade_issuer_emits_issuer_upgraded_event() {
         issuer_id: setup.issuer_id.clone(),
         token: setup.token_address.clone(),
         new_wasm_hash: new_wasm_hash.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn pause_emits_paused_event() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    factory.pause();
+
+    let expected_event = Paused {
+        pauser: setup.pauser.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn unpause_emits_unpaused_event() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    factory.pause();
+    factory.unpause();
+
+    let expected_event = Unpaused {
+        pauser: setup.pauser.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn issuer_created_event_includes_token() {
+    // The test event buffer retains only the most recent emission, so create
+    // the issuer as the final operation and assert immediately afterwards.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner = Address::generate(&env);
+    let pauser = Address::generate(&env);
+    let manager = Address::generate(&env);
+    let destination = Address::generate(&env);
+    let issuer_id = rand_bytes(&env);
+
+    let issuer_wasm_hash = upload_issuer_wasm(&env);
+    let factory_address = env.register(Factory, (owner, pauser, issuer_wasm_hash));
+    let factory = FactoryClient::new(&env, &factory_address);
+
+    let token_admin_address = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin_address);
+    let token_address = sac.address();
+
+    let issuer_address = factory.create_issuer(&issuer_id, &token_address, &manager, &destination);
+
+    let expected_event = IssuerCreated {
+        issuer_id: issuer_id.clone(),
+        token: token_address.clone(),
+        issuer: issuer_address.clone(),
+        manager: manager.clone(),
+        destination: destination.clone(),
+    };
+    let events = env.events().all().filter_by_contract(&factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&env, &factory_address)));
+}
+
+#[test]
+fn transfer_event_includes_issuer_id_and_debitor() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let transfer_uuid = rand_bytes(&setup.env);
+
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &transfer_uuid,
+    );
+
+    let expected_event = TransferExecuted {
+        uuid: transfer_uuid.clone(),
+        issuer_id: setup.issuer_id.clone(),
+        account: setup.user_account.clone(),
+        debitor: setup.debitor.clone(),
+        destination: setup.destination.clone(),
+        token: setup.token_address.clone(),
+        amount: AMOUNT,
     };
     let events = setup
         .env

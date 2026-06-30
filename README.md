@@ -301,6 +301,31 @@ above the ledger interval.
    require `amount + margin` in token base units at authorization time, not
    exact amount. This filters approvals that are likely to fail at inclusion.
 
+### Event Observability
+
+Off-chain monitoring of contract events is the operational mitigation for the
+privileged owner/debitor powers, so the factory emits an event for every
+state-changing entrypoint and tags the natural lookup keys as event topics so
+RPC `getEvents` can filter them server-side.
+
+- Security-critical state transitions are observable: `Paused`/`Unpaused`
+  (topic: `pauser`), `OwnerUpdated` (topic: `new_owner`), `PauserUpdated`
+  (topic: `new_pauser`), `ContractUpgraded`, and `IssuerUpgraded` (topic:
+  `issuer_id`).
+- Policy and transfer events carry their reconciliation keys as topics:
+  `IssuerCreated` (`issuer_id`, `token`), `TransferExecuted` (`uuid`,
+  `issuer_id`, `account`), `DestinationUpdated` (`issuer_id`, `destination`),
+  `DebitorUpdated` (`issuer_id`, `debitor`), `ManagedUpdated` (`issuer_id`,
+  `manager`), and `UserVelocityUpdated` (`issuer_id`, `token`, `user`).
+- `TransferExecuted` records the signing `debitor` alongside the debited
+  `account`, so a debit can be attributed to both a policy scope and a signer.
+  `debitor` is carried in event data (not a topic) because the host caps a
+  contract event at four topics including the event name, so debitor-only
+  queries filter client-side.
+
+Because Soroban events are not retained indefinitely, long-range historical
+reconciliation depends on an off-chain indexer ingesting these events promptly.
+
 ## State Archival (TTL) And Rent
 
 Soroban charges rent for ledger storage: every entry has a TTL that only an

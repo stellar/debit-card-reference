@@ -18,7 +18,8 @@ mod velocity;
 
 use crate::events::{
     ContractUpgraded, DebitorUpdated, DestinationUpdated, IssuerCreated, IssuerUpgraded,
-    ManagedUpdated, OwnerUpdated, PauserUpdated, TransferExecuted, UserVelocityUpdated,
+    ManagedUpdated, OwnerUpdated, Paused, PauserUpdated, TransferExecuted, Unpaused,
+    UserVelocityUpdated,
 };
 use pausable::{require_not_paused, Pausable};
 use soroban_sdk::{
@@ -159,6 +160,7 @@ impl Factory {
 
         IssuerCreated {
             issuer_id,
+            token,
             issuer: deployed_issuer_address.clone(),
             manager,
             destination,
@@ -339,7 +341,9 @@ impl Factory {
 
         TransferExecuted {
             uuid,
+            issuer_id,
             account,
+            debitor,
             destination,
             token,
             amount,
@@ -646,8 +650,11 @@ impl Pausable for Factory {
     /// Requires authorization from the configured pauser.
     fn pause(env: Env) {
         extend_instance_ttl(&env);
-        pauser(&env).require_auth();
+        let pauser = pauser(&env);
+        pauser.require_auth();
         pausable::pause(&env);
+
+        Paused { pauser }.publish(&env);
     }
 
     /// Unpauses the contract.
@@ -659,7 +666,10 @@ impl Pausable for Factory {
     /// Requires authorization from the configured pauser.
     fn unpause(env: Env) {
         extend_instance_ttl(&env);
-        pauser(&env).require_auth();
+        let pauser = pauser(&env);
+        pauser.require_auth();
         pausable::unpause(&env);
+
+        Unpaused { pauser }.publish(&env);
     }
 }

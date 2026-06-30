@@ -26,10 +26,10 @@ use soroban_sdk::{
     xdr::ToXdr, Address, BytesN, Env,
 };
 use storage::{
-    authorized_debitor, is_allowed_destination, issuer_address, issuer_manager, issuer_wasm_hash,
-    owner, pauser, remove_allowed_destination, remove_authorized_debitor, set_allowed_destination,
-    set_authorized_debitor, set_issuer_address, set_issuer_manager, set_issuer_wasm_hash,
-    set_paused, user_velocity,
+    authorized_debitor, extend_instance_ttl, is_allowed_destination, issuer_address,
+    issuer_manager, issuer_wasm_hash, owner, pauser, remove_allowed_destination,
+    remove_authorized_debitor, set_allowed_destination, set_authorized_debitor, set_issuer_address,
+    set_issuer_manager, set_issuer_wasm_hash, set_paused, user_velocity,
 };
 use velocity::{
     set_user_velocity_limits, validate_and_update_user_velocity, validate_velocity_config,
@@ -138,6 +138,7 @@ impl Factory {
         manager: Address,
         destination: Address,
     ) -> Address {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
         owner(&env).require_auth();
 
@@ -273,6 +274,7 @@ impl Factory {
         destination: Address,
         allowed: bool,
     ) {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
         owner(&env).require_auth();
 
@@ -314,6 +316,7 @@ impl Factory {
         destination: Address,
         uuid: BytesN<32>,
     ) {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
 
         if !authorized_debitor(&env, &issuer_id, &debitor) {
@@ -358,6 +361,7 @@ impl Factory {
         debitor: Address,
         authorized: bool,
     ) {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
         let Some(manager) = issuer_manager(&env, &issuer_id) else {
             panic_with_error!(&env, FactoryError::IssuerManagerNotFound);
@@ -388,6 +392,7 @@ impl Factory {
     /// # Authorization
     /// Requires owner authorization and a non-paused contract state.
     pub fn set_authorized_manager(env: Env, issuer_id: BytesN<32>, manager: Address) {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
         owner(&env).require_auth();
 
@@ -426,6 +431,7 @@ impl Factory {
         period_spend_limit: i128,
         per_transaction_spend_limit: i128,
     ) {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
         let Some(manager) = issuer_manager(&env, &issuer_id) else {
             panic_with_error!(&env, FactoryError::IssuerManagerNotFound);
@@ -498,6 +504,7 @@ impl Factory {
     /// The new-owner co-signature prevents accidental loss of ownership to an
     /// unreachable address. Not gated by pause state.
     pub fn set_owner(env: Env, new_owner: Address) {
+        extend_instance_ttl(&env);
         let current_owner = owner(&env);
         current_owner.require_auth();
         new_owner.require_auth();
@@ -520,6 +527,7 @@ impl Factory {
     /// # Authorization
     /// Requires authorization from the current owner. Not gated by pause state.
     pub fn set_pauser_by_owner(env: Env, new_pauser: Address) {
+        extend_instance_ttl(&env);
         owner(&env).require_auth();
 
         let old_pauser = pauser(&env);
@@ -541,6 +549,7 @@ impl Factory {
     /// # Authorization
     /// Requires authorization from the current pauser and a non-paused contract state.
     pub fn set_pauser_by_pauser(env: Env, new_pauser: Address) {
+        extend_instance_ttl(&env);
         require_not_paused(&env);
         let old_pauser = pauser(&env);
         old_pauser.require_auth();
@@ -563,6 +572,7 @@ impl Factory {
     /// # Authorization
     /// Requires authorization from the current owner. Not gated by pause state.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        extend_instance_ttl(&env);
         owner(&env).require_auth();
 
         env.deployer()
@@ -587,6 +597,7 @@ impl Factory {
         token: Address,
         new_wasm_hash: BytesN<32>,
     ) {
+        extend_instance_ttl(&env);
         owner(&env).require_auth();
 
         let Some(issuer_contract_address) = issuer_address(&env, &issuer_id, &token) else {
@@ -629,6 +640,7 @@ impl Pausable for Factory {
     /// # Authorization
     /// Requires authorization from the configured pauser.
     fn pause(env: Env) {
+        extend_instance_ttl(&env);
         pauser(&env).require_auth();
         pausable::pause(&env);
     }
@@ -641,6 +653,7 @@ impl Pausable for Factory {
     /// # Authorization
     /// Requires authorization from the configured pauser.
     fn unpause(env: Env) {
+        extend_instance_ttl(&env);
         pauser(&env).require_auth();
         pausable::unpause(&env);
     }

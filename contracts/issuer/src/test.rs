@@ -4,7 +4,8 @@
 extern crate std;
 
 use super::{Issuer, IssuerClient};
-use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::storage::Instance as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::IntoVal;
 use soroban_sdk::{Address, Env};
@@ -65,4 +66,45 @@ fn transfer_to_destination_succeeds_with_factory_auth() {
 
     assert_eq!(token.balance(&user_account), 900);
     assert_eq!(token.balance(&destination), 100);
+}
+
+// --- FIND-002: storage TTL management ---
+
+#[test]
+fn issuer_keeps_instance_ttl_extended() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory = Address::generate(&env);
+    let issuer_address = env.register(Issuer, (factory,));
+    let issuer = IssuerClient::new(&env, &issuer_address);
+    let max_ttl = env.as_contract(&issuer_address, || env.storage().max_ttl());
+
+    // The constructor extends the fresh instance entry (created with the
+    // network minimum TTL, 4096 in the test env) to the network maximum.
+    let constructed_ttl = env.as_contract(&issuer_address, || env.storage().instance().get_ttl());
+    assert_eq!(constructed_ttl, max_ttl);
+
+    // Decay below the ~30-day extension threshold, then verify a transfer
+    // extends the instance entry back to the maximum.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_900_000);
+
+    let token_admin_address = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin_address);
+    let token_address = sac.address();
+    let token_admin = StellarAssetClient::new(&env, &token_address);
+    let user_account = Address::generate(&env);
+    let destination = Address::generate(&env);
+    token_admin.mint(&user_account, &1_000);
+    TokenClient::new(&env, &token_address).approve(
+        &user_account,
+        &issuer_address,
+        &1_000,
+        &(env.ledger().sequence() + 1000),
+    );
+
+    issuer.transfer_to_destination(&token_address, &user_account, &destination, &100);
+
+    let refreshed_ttl = env.as_contract(&issuer_address, || env.storage().instance().get_ttl());
+    assert_eq!(refreshed_ttl, max_ttl);
 }

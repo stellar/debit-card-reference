@@ -111,7 +111,6 @@ impl Factory {
     /// # Authorization
     /// No runtime authorization check. This entrypoint is only callable at contract initialization.
     pub fn __constructor(env: Env, owner: Address, pauser: Address, issuer_wasm_hash: BytesN<32>) {
-        extend_instance_ttl(&env);
         storage::set_owner(&env, &owner);
         storage::set_pauser(&env, &pauser);
         set_paused(&env, false);

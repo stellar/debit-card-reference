@@ -126,8 +126,10 @@ Factory checks include:
 - destination is allowlisted for issuer
 - issuer exists for `(issuer_id, token)`
 - velocity constraints pass:
-  positive amount, per-transaction limit, rolling-period limit,
+  positive amount, per-transaction limit, fixed-window period limit,
   and one transfer per ledger
+  (see [Velocity Semantics](#velocity-semantics) for how the period limit
+  behaves at a window boundary)
 
 If checks pass, factory calls the issuer contract, and issuer performs:
 
@@ -198,6 +200,27 @@ before the debit transaction is included onchain.
 
 If you can wait for onchain inclusion before offchain confirmation, that is the
 safer path.
+
+### Velocity Semantics
+
+The per-user period limit is a **fixed window**, not a sliding/rolling one.
+`period_spent` is tracked against a window that re-anchors to the timestamp of
+the first transfer after the previous window elapsed (see
+`validate_and_update_user_velocity` in `contracts/factory/src/velocity.rs`):
+once `now - period_last_reset_timestamp >= period_duration_seconds`, the spend
+counter resets to zero and the window restarts from the current transfer.
+
+A consequence is that up to ~2x `period_spend_limit` can be spent across a
+single window boundary: a cardholder can spend the full limit just before a
+window elapses and the full limit again immediately after the reset, within a
+span shorter than `period_duration_seconds`. This is an inherent property of
+fixed-window rate limiting. Size `period_spend_limit` and
+`period_duration_seconds` with that boundary burst in mind, and keep
+`period_duration_seconds` large enough that the per-ledger / one-transfer-per-
+ledger controls remain the finer-grained limit. A very small
+`period_duration_seconds` (for example `1`) makes nearly every ledger a fresh
+window, collapsing the period cap to a per-ledger limit; pick a duration well
+above the ledger interval.
 
 ### Limitations
 

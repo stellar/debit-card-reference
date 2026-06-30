@@ -63,7 +63,7 @@ pub enum FactoryError {
     InvalidTransferAmount = 3,
     /// Transfer exceeds per-transaction spend limit.
     PerTransactionSpendLimitExceeded = 4,
-    /// Transfer exceeds rolling period spend limit.
+    /// Transfer exceeds the fixed-window period spend limit.
     PeriodSpendLimitExceeded = 5,
     /// More than one transfer was attempted in the same ledger for this user scope.
     OneTransferPerLedger = 6,
@@ -82,9 +82,9 @@ pub enum FactoryError {
 #[contracttype]
 #[derive(Clone, Default)]
 pub struct UserVelocity {
-    /// Rolling period length in seconds.
+    /// Fixed-window period length in seconds.
     pub period_duration_seconds: u64,
-    /// Maximum spend allowed during a rolling period.
+    /// Maximum spend allowed during a fixed window (re-anchored on reset).
     pub period_spend_limit: i128,
     /// Maximum spend allowed per transfer.
     pub per_transaction_spend_limit: i128,
@@ -416,7 +416,7 @@ impl Factory {
     /// * `issuer_id` - Issuer identifier whose limits are being configured.
     /// * `token` - Token address for the velocity configuration scope.
     /// * `user` - User address whose velocity is configured.
-    /// * `period_duration_seconds` - Rolling period length in seconds.
+    /// * `period_duration_seconds` - Fixed-window period length in seconds.
     /// * `period_spend_limit` - Maximum spend allowed per period.
     /// * `per_transaction_spend_limit` - Maximum spend per transfer.
     ///

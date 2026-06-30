@@ -80,9 +80,9 @@ pub struct UserVelocityUpdated {
     pub token: Address,
     /// User address for velocity scope.
     pub user: Address,
-    /// Rolling period length in seconds.
+    /// Fixed-window period length in seconds.
     pub period_duration_seconds: u64,
-    /// Max spend in a rolling period.
+    /// Max spend in a fixed window.
     pub period_spend_limit: i128,
     /// Max spend per transaction.
     pub per_transaction_spend_limit: i128,

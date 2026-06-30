@@ -172,8 +172,10 @@ Factory checks include:
 - destination is allowlisted for issuer
 - issuer exists for `(issuer_id, token)`
 - velocity constraints pass:
-  positive amount, per-transaction limit, rolling-period limit,
+  positive amount, per-transaction limit, fixed-window period limit,
   and one transfer per ledger
+  (see [Velocity Semantics](#velocity-semantics) for how the period limit
+  behaves at a window boundary)
 
 If checks pass, factory calls the issuer contract, and issuer performs:
 
@@ -245,6 +247,27 @@ before the debit transaction is included onchain.
 If you can wait for onchain inclusion before offchain confirmation, that is the
 safer path.
 
+### Velocity Semantics
+
+The per-user period limit is a **fixed window**, not a sliding/rolling one.
+`period_spent` is tracked against a window that re-anchors to the timestamp of
+the first transfer after the previous window elapsed (see
+`validate_and_update_user_velocity` in `contracts/factory/src/velocity.rs`):
+once `now - period_last_reset_timestamp >= period_duration_seconds`, the spend
+counter resets to zero and the window restarts from the current transfer.
+
+A consequence is that up to ~2x `period_spend_limit` can be spent across a
+single window boundary: a cardholder can spend the full limit just before a
+window elapses and the full limit again immediately after the reset, within a
+span shorter than `period_duration_seconds`. This is an inherent property of
+fixed-window rate limiting. Size `period_spend_limit` and
+`period_duration_seconds` with that boundary burst in mind, and keep
+`period_duration_seconds` large enough that the per-ledger / one-transfer-per-
+ledger controls remain the finer-grained limit. A very small
+`period_duration_seconds` (for example `1`) makes nearly every ledger a fresh
+window, collapsing the period cap to a per-ledger limit; pick a duration well
+above the ledger interval.
+
 ### Limitations
 
 1. Balance depletion before inclusion:
@@ -277,6 +300,53 @@ safer path.
 1. Require balance headroom:
    require `amount + margin` in token base units at authorization time, not
    exact amount. This filters approvals that are likely to fail at inclusion.
+
+## State Archival (TTL) And Rent
+
+Soroban charges rent for ledger storage: every entry has a TTL that only an
+explicit `extend_ttl` call refreshes — ordinary reads and writes do not. An
+entry whose TTL lapses is archived. Since Protocol 23, archived entries are
+restored automatically when the next transaction touches them (simulation adds
+them to the restore list), so archival normally costs extra fees on the next
+access rather than an outage — but clients that submit stale, hand-built
+footprints fail until the entry is restored.
+
+Both contracts extend TTLs on use: once an entry's remaining TTL falls below
+~30 days, the next access extends it to the network maximum (~180 days on
+mainnet). This covers the factory's persistent entries (issuer addresses,
+managers, destination allowlist, debitor authorizations, user velocity — reads
+included, since most are written once and only read afterward), the factory
+instance + code entries on every state-mutating entrypoint, and each issuer's
+instance + code entries on every transfer and upgrade. A deployment exercised
+at least once per maximum-TTL window never archives in normal operation.
+
+Idle state still archives: a dormant issuer's instance/code entries, the
+uploaded issuer WASM (kept alive only by issuer activity; if it archives,
+`create_issuer` fails until it is restored), and any long-idle persistent entry
+(e.g. a dormant cardholder's velocity scope). New entries start at the network
+minimum (~120 days on mainnet) and are first extended once they decay below the
+~30-day threshold.
+
+### Runbook
+
+Monitor `liveUntilLedgerSeq` (via the `getLedgerEntries` RPC) for the factory
+and issuer instance/code entries, the issuer WASM, and long-idle persistent
+entries. Anyone can pay to extend or restore — no contract authorization:
+
+```bash
+# Persistent entry
+stellar contract extend --id <CONTRACT_ID> --durability persistent \
+  --key-xdr <ENTRY_KEY_XDR> --ledgers-to-extend <N>
+
+# Contract instance (omit the key). Does NOT cover the code entry.
+stellar contract extend --id <CONTRACT_ID> --ledgers-to-extend <N>
+
+# Contract code, including the uploaded issuer WASM
+stellar contract extend --wasm-hash <WASM_HASH> --ledgers-to-extend <N>
+```
+
+If an entry has already archived, use `stellar contract restore` with the same
+key arguments.
 
 ## Acknowledgments
 

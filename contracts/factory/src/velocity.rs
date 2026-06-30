@@ -65,7 +65,7 @@ pub fn validate_and_update_user_velocity(
     let mut velocity = user_velocity(env, issuer_id, token, user);
 
     let now = env.ledger().timestamp();
-    // Reset period accounting once the rolling window elapsed.
+    // Reset period accounting once the fixed window elapsed (re-anchors to now).
     if now.saturating_sub(velocity.period_last_reset_timestamp) >= velocity.period_duration_seconds
     {
         velocity.period_spent = 0;

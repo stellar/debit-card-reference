@@ -8,11 +8,12 @@ use super::{
         ContractUpgraded, IssuerUpgraded, ManagedUpdated, OwnerUpdated, PauserUpdated,
         UserVelocityUpdated,
     },
-    storage::set_user_velocity,
+    storage::{set_user_velocity, PersistentKey},
     Factory, FactoryClient, FactoryError, UserVelocity,
 };
 use proptest::prelude::*;
 use rstest::rstest;
+use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{xdr::ToXdr, Address, BytesN, Env, Event, IntoVal};
@@ -1874,4 +1875,135 @@ proptest! {
         prop_assert!(third.is_ok());
         prop_assert_eq!(token.balance(&setup.destination), first_amount + third_amount);
     }
+}
+
+// --- FIND-002: storage TTL management ---
+
+/// Ledgers to decay before re-checking TTLs: enough to push entries that were
+/// extended to the network maximum (6,312,000 in the test env) below the
+/// contract's ~30-day extension threshold, without any TTL reaching zero.
+const TTL_DECAY_LEDGERS: u32 = 5_900_000;
+
+fn persistent_ttl(setup: &TestContext, key: &PersistentKey) -> u32 {
+    setup.env.as_contract(&setup.factory_address, || {
+        setup.env.storage().persistent().get_ttl(key)
+    })
+}
+
+fn instance_ttl(setup: &TestContext, contract: &Address) -> u32 {
+    setup
+        .env
+        .as_contract(contract, || setup.env.storage().instance().get_ttl())
+}
+
+/// The maximum TTL extensions can reach, as the contract computes it
+/// (`max_entry_ttl` minus the current ledger).
+fn network_max_ttl(setup: &TestContext) -> u32 {
+    setup
+        .env
+        .as_contract(&setup.factory_address, || setup.env.storage().max_ttl())
+}
+
+/// Every persistent policy entry created by `TestContext::for_flow`.
+fn policy_keys(setup: &TestContext) -> [PersistentKey; 5] {
+    [
+        PersistentKey::UserVelocity(
+            setup.issuer_id.clone(),
+            setup.token_address.clone(),
+            setup.user_account.clone(),
+        ),
+        PersistentKey::AuthorizedDebitor(setup.issuer_id.clone(), setup.debitor.clone()),
+        PersistentKey::AllowedDestination(setup.issuer_id.clone(), setup.destination.clone()),
+        PersistentKey::IssuerAddress(setup.issuer_id.clone(), setup.token_address.clone()),
+        PersistentKey::IssuerManager(setup.issuer_id.clone()),
+    ]
+}
+
+#[test]
+fn setup_extends_all_ttls_to_network_max() {
+    let setup = TestContext::for_flow(true, true);
+    let max_ttl = network_max_ttl(&setup);
+
+    // Fresh entries are created with the network minimum TTL (4096 in the
+    // test env); the storage accessors must have extended every one to max.
+    for key in policy_keys(&setup) {
+        assert_eq!(persistent_ttl(&setup, &key), max_ttl);
+    }
+    assert_eq!(instance_ttl(&setup, &setup.factory_address), max_ttl);
+    assert_eq!(instance_ttl(&setup, &setup.issuer_address), max_ttl);
+}
+
+#[test]
+fn transfer_extends_ttls_of_entries_it_touches() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let token = TokenClient::new(&setup.env, &setup.token_address);
+    let max_ttl = network_max_ttl(&setup);
+    let decayed_ttl = max_ttl - TTL_DECAY_LEDGERS;
+
+    let sequence = setup.env.ledger().sequence();
+    setup
+        .env
+        .ledger()
+        .set_sequence_number(sequence + TTL_DECAY_LEDGERS);
+    for key in policy_keys(&setup) {
+        assert_eq!(persistent_ttl(&setup, &key), decayed_ttl);
+    }
+
+    // Refresh the token allowance, which expired with the ledger jump.
+    token.approve(
+        &setup.user_account,
+        &setup.issuer_address,
+        &INITIAL_BALANCE,
+        &(setup.env.ledger().sequence() + 1000),
+    );
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &rand_bytes(&setup.env),
+    );
+
+    let [velocity, debitor, destination, issuer_address, manager] = policy_keys(&setup);
+    // The transfer writes velocity and only reads debitor, destination, and
+    // issuer address; reads and writes alike must extend back to max.
+    assert_eq!(persistent_ttl(&setup, &velocity), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &debitor), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &destination), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &issuer_address), max_ttl);
+    // The manager entry is not touched by transfers and keeps decaying.
+    assert_eq!(persistent_ttl(&setup, &manager), decayed_ttl);
+    // Both contract instances were kept alive.
+    assert_eq!(instance_ttl(&setup, &setup.factory_address), max_ttl);
+    assert_eq!(instance_ttl(&setup, &setup.issuer_address), max_ttl);
+}
+
+#[test]
+fn manager_call_extends_manager_and_velocity_ttls() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let max_ttl = network_max_ttl(&setup);
+
+    let sequence = setup.env.ledger().sequence();
+    setup
+        .env
+        .ledger()
+        .set_sequence_number(sequence + TTL_DECAY_LEDGERS);
+
+    factory.update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &3600,
+        &(INITIAL_BALANCE * 10),
+        &(INITIAL_BALANCE * 10),
+    );
+
+    let [velocity, _, _, _, manager] = policy_keys(&setup);
+    assert_eq!(persistent_ttl(&setup, &velocity), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &manager), max_ttl);
+    assert_eq!(instance_ttl(&setup, &setup.factory_address), max_ttl);
 }

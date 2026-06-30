@@ -39,6 +39,107 @@ wallets approve that issuer contract as spender.
 - `cardholder`:
   wallet owner whose account is debited after approving the issuer contract.
 
+## Trust Model And Privileged Roles
+
+The `owner` is the system's root of trust. By design, and without any code
+upgrade or cardholder action, the owner can reach every guardrail that
+constrains how an allowance is spent:
+
+- it can reassign a per-issuer `manager` to itself (`set_authorized_manager`),
+  and as that manager authorize itself as a `debitor`
+  (`update_authorized_debitor`) and raise velocity limits
+  (`update_user_velocity`);
+- it can allowlist a destination it controls (`update_issuer_destination`, or
+  the `destination` argument of `create_issuer`);
+- it can then call `transfer_to_destination` to pull from any account holding a
+  live allowance to the issuer contract, up to that allowance.
+
+The owner can also replace the factory's or any issuer's bytecode in place
+(`upgrade`, `upgrade_issuer`). `upgrade_issuer` preserves the issuer contract's
+address, and the cardholder's SEP-41 allowance is keyed by
+`(from, spender = issuer_address)`, so every existing allowance remains
+spendable by the replacement code with no cardholder action. The upgrade paths
+are intentionally not gated by the pause flag — the owner must be able to ship a
+fix while the contract is frozen — so a pauser freeze does not constrain the
+owner.
+
+This concentration of authority is inherent to a non-custodial pull-payment
+model: the allowance exists precisely so the card operator can debit the wallet
+when a card is swiped, and the owner key is that operator. The role split
+(owner / manager / debitor) bounds the blast radius of a *manager* or *debitor*
+key compromise; it is not a trust boundary against the owner.
+
+A cardholder's exposure is always bounded by their token allowance amount and
+its `expiration_ledger`, and can be removed at any time by re-approving `0` or
+letting the allowance expire.
+
+### Debitor Key Compromise
+
+The `debitor` is the largest operational attack surface in a running deployment:
+it is the internet-facing hot key a payments backend signs with on every card
+swipe. `transfer_to_destination` authenticates only that debitor. The debited
+`account` is a parameter chosen by the debitor — the cardholder consents once,
+up front, through the token allowance, and does not sign each debit. This is
+inherent to the card flow: at swipe time the cardholder cannot produce a
+signature inside the card network's authorization window. Debitor authorization
+is keyed by `issuer_id` alone (`AuthorizedDebitor(issuer_id, debitor)`), so a
+single authorized debitor key is valid across every token under that issuer.
+
+A compromised debitor key can therefore attempt debits against every account
+holding a live allowance to that issuer's contracts, across all of the issuer's
+tokens, with no cardholder action — the blast radius is the issuer's entire
+enrolled user base. Four controls bound that blast radius:
+
+1. The debitor cannot administer policy. It cannot allowlist a payout address
+   (`update_issuer_destination` is owner-only) and it cannot raise velocity
+   limits (`update_user_velocity` is manager-only). Funds only ever settle to a
+   destination the owner allowlisted, so direct theft requires a colluding or
+   attacker-controlled allowlisted destination; absent that, the damage is
+   forced payments to *legitimate* destinations, which the operator can reverse
+   off-chain. This separation of duties is the one hard on-chain bound.
+2. Per-account drain is rate-limited. The per-transaction cap, the
+   rolling-period cap, and the one-transfer-per-ledger guard
+   (`validate_and_update_user_velocity`) cap how fast any single cardholder can
+   be drained.
+3. Each debit is bounded by the cardholder's allowance amount and its
+   `expiration_ledger`. No debit can exceed the approved amount, and the
+   exposure ends when the allowance expires or is re-approved to `0`.
+4. Incident response. The `pauser` can freeze *all* transfers globally, and the
+   `manager` can revoke the key with `update_authorized_debitor`. These are
+   alternative levers, not simultaneous ones: `update_authorized_debitor` is
+   itself pause-gated, so revocation requires a non-paused contract. Freeze
+   first to stop the bleeding (then unpause to revoke), or revoke the key first
+   and pause only if broader containment is needed.
+
+### Deployment Guidance
+
+1. Set `owner` to an address with shared control, not a single key. This can be
+   a Stellar account configured with multiple signers and a high signing
+   threshold, or a contract address that enforces its own governance (for
+   example a multisig or timelock contract). Consider using a separate upgrade
+   authority and/or a timelock for `upgrade` and `upgrade_issuer`, so role and
+   code changes are observable on-chain before they take effect.
+2. Keep per-user velocity limits low and instruct wallets to grant small,
+   short-lived allowances, so the bounded exposure of any owner action or key
+   compromise stays within an acceptable loss.
+3. Every role change and upgrade emits an event (`OwnerUpdated`,
+   `PauserUpdated`, `ManagedUpdated`, `DebitorUpdated`, `DestinationUpdated`,
+   `UserVelocityUpdated`, `ContractUpgraded`, `IssuerUpgraded`). Monitor these
+   and alert on any change that did not originate from an expected operator
+   action.
+4. Treat the debitor as a least-privilege, frequently rotated hot key: give it
+   no other role, rotate it on a schedule via `update_authorized_debitor`
+   (authorize the new key, then revoke the old), and keep each issuer's
+   destination allowlist as small as the settlement flow permits.
+5. Monitor `TransferExecuted` events for anomalies — volume spikes, many
+   distinct accounts debited in a short window, or off-hours activity — and wire
+   alerts into the pause and debitor-revocation incident path so a suspected key
+   compromise can be contained immediately.
+
+Pause does not constrain the owner: the upgrade paths are not pause-gated, and
+the owner can rotate roles and execute transfers through the paths above
+regardless of who holds the pauser role.
+
 ## Expected Setup Flow
 
 1. Deploy `issuer` Wasm and get its hash.
@@ -71,8 +172,10 @@ Factory checks include:
 - destination is allowlisted for issuer
 - issuer exists for `(issuer_id, token)`
 - velocity constraints pass:
-  positive amount, per-transaction limit, rolling-period limit,
+  positive amount, per-transaction limit, fixed-window period limit,
   and one transfer per ledger
+  (see [Velocity Semantics](#velocity-semantics) for how the period limit
+  behaves at a window boundary)
 
 If checks pass, factory calls the issuer contract, and issuer performs:
 
@@ -144,6 +247,27 @@ before the debit transaction is included onchain.
 If you can wait for onchain inclusion before offchain confirmation, that is the
 safer path.
 
+### Velocity Semantics
+
+The per-user period limit is a **fixed window**, not a sliding/rolling one.
+`period_spent` is tracked against a window that re-anchors to the timestamp of
+the first transfer after the previous window elapsed (see
+`validate_and_update_user_velocity` in `contracts/factory/src/velocity.rs`):
+once `now - period_last_reset_timestamp >= period_duration_seconds`, the spend
+counter resets to zero and the window restarts from the current transfer.
+
+A consequence is that up to ~2x `period_spend_limit` can be spent across a
+single window boundary: a cardholder can spend the full limit just before a
+window elapses and the full limit again immediately after the reset, within a
+span shorter than `period_duration_seconds`. This is an inherent property of
+fixed-window rate limiting. Size `period_spend_limit` and
+`period_duration_seconds` with that boundary burst in mind, and keep
+`period_duration_seconds` large enough that the per-ledger / one-transfer-per-
+ledger controls remain the finer-grained limit. A very small
+`period_duration_seconds` (for example `1`) makes nearly every ledger a fresh
+window, collapsing the period cap to a per-ledger limit; pick a duration well
+above the ledger interval.
+
 ### Limitations
 
 1. Balance depletion before inclusion:
@@ -176,6 +300,53 @@ safer path.
 1. Require balance headroom:
    require `amount + margin` in token base units at authorization time, not
    exact amount. This filters approvals that are likely to fail at inclusion.
+
+## State Archival (TTL) And Rent
+
+Soroban charges rent for ledger storage: every entry has a TTL that only an
+explicit `extend_ttl` call refreshes — ordinary reads and writes do not. An
+entry whose TTL lapses is archived. Since Protocol 23, archived entries are
+restored automatically when the next transaction touches them (simulation adds
+them to the restore list), so archival normally costs extra fees on the next
+access rather than an outage — but clients that submit stale, hand-built
+footprints fail until the entry is restored.
+
+Both contracts extend TTLs on use: once an entry's remaining TTL falls below
+~30 days, the next access extends it to the network maximum (~180 days on
+mainnet). This covers the factory's persistent entries (issuer addresses,
+managers, destination allowlist, debitor authorizations, user velocity — reads
+included, since most are written once and only read afterward), the factory
+instance + code entries on every state-mutating entrypoint, and each issuer's
+instance + code entries on every transfer and upgrade. A deployment exercised
+at least once per maximum-TTL window never archives in normal operation.
+
+Idle state still archives: a dormant issuer's instance/code entries, the
+uploaded issuer WASM (kept alive only by issuer activity; if it archives,
+`create_issuer` fails until it is restored), and any long-idle persistent entry
+(e.g. a dormant cardholder's velocity scope). New entries start at the network
+minimum (~120 days on mainnet) and are first extended once they decay below the
+~30-day threshold.
+
+### Runbook
+
+Monitor `liveUntilLedgerSeq` (via the `getLedgerEntries` RPC) for the factory
+and issuer instance/code entries, the issuer WASM, and long-idle persistent
+entries. Anyone can pay to extend or restore — no contract authorization:
+
+```bash
+# Persistent entry
+stellar contract extend --id <CONTRACT_ID> --durability persistent \
+  --key-xdr <ENTRY_KEY_XDR> --ledgers-to-extend <N>
+
+# Contract instance (omit the key). Does NOT cover the code entry.
+stellar contract extend --id <CONTRACT_ID> --ledgers-to-extend <N>
+
+# Contract code, including the uploaded issuer WASM
+stellar contract extend --wasm-hash <WASM_HASH> --ledgers-to-extend <N>
+```
+
+If an entry has already archived, use `stellar contract restore` with the same
+key arguments.
 
 ## Acknowledgments
 

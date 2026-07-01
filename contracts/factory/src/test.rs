@@ -9,6 +9,7 @@ use super::{
         PauserUpdated, TransferExecuted, Unpaused, UserVelocityUpdated,
     },
     storage::{set_user_velocity, PersistentKey},
+    velocity::MIN_PERIOD_DURATION_SECONDS,
     Factory, FactoryClient, FactoryError, UserVelocity,
 };
 use proptest::prelude::*;
@@ -1071,6 +1072,62 @@ fn velocity_rejects_invalid_config(
     assert_eq!(result, Err(Ok(FactoryError::InvalidVelocityConfig.into())));
 }
 
+#[test]
+fn velocity_rejects_per_tx_exceeding_period() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let result = factory.try_update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &3600,
+        &100,
+        &200,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidVelocityConfig.into())));
+}
+
+#[test]
+fn velocity_rejects_below_minimum_duration() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let result = factory.try_update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &(MIN_PERIOD_DURATION_SECONDS - 1),
+        &1000,
+        &1000,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidVelocityConfig.into())));
+}
+
+#[test]
+fn velocity_accepts_equal_limits() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    factory.update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &MIN_PERIOD_DURATION_SECONDS,
+        &1000,
+        &1000,
+    );
+
+    let configured =
+        factory.get_user_velocity(&setup.issuer_id, &setup.token_address, &setup.user_account);
+    assert_eq!(configured.per_transaction_spend_limit, 1000);
+    assert_eq!(configured.period_spend_limit, 1000);
+    assert_eq!(
+        configured.period_duration_seconds,
+        MIN_PERIOD_DURATION_SECONDS
+    );
+}
+
 #[rstest]
 #[case(-1)]
 #[case(0)]
@@ -1909,7 +1966,7 @@ proptest! {
     #[test]
     fn prop_period_resets_after_duration(
         (first_amount, second_amount, period_limit, period_duration_seconds, third_amount) in
-            (1i128..=300, 1i128..=300, 1u64..=120)
+            (1i128..=300, 1i128..=300, MIN_PERIOD_DURATION_SECONDS..=(MIN_PERIOD_DURATION_SECONDS + 120))
                 .prop_flat_map(|(first_amount, second_amount, period_duration_seconds)| {
                     let min_limit = if first_amount > second_amount {
                         first_amount

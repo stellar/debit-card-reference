@@ -8,8 +8,8 @@ use super::{
         ContractUpgraded, IssuerCreated, IssuerUpgraded, ManagedUpdated, OwnerUpdated, Paused,
         PauserUpdated, TransferExecuted, Unpaused, UserVelocityUpdated,
     },
-    velocity::MIN_PERIOD_DURATION_SECONDS,
     storage::{set_user_velocity, PersistentKey},
+    velocity::MIN_PERIOD_DURATION_SECONDS,
     Factory, FactoryClient, FactoryError, UserVelocity,
 };
 use proptest::prelude::*;

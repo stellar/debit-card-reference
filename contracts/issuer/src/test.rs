@@ -68,8 +68,6 @@ fn transfer_to_destination_succeeds_with_factory_auth() {
     assert_eq!(token.balance(&destination), 100);
 }
 
-// --- FIND-002: storage TTL management ---
-
 #[test]
 fn issuer_keeps_instance_ttl_extended() {
     let env = Env::default();

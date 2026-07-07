@@ -4,7 +4,13 @@ on:
   workflow_call: # allows this workflow to be called from another workflow
 
 env:
-  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN || '1.92.0' }}
+  # rust-toolchain.toml is the authoritative pin; RUST_TOOLCHAIN is an optional
+  # break-glass override. When unset, the Setup Rust step reads the channel from
+  # rust-toolchain.toml so the file and CI never disagree silently.
+  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN }}
+  # Property-test depth in CI. Defaults to proptest's own library default (256);
+  # override via the PROPTEST_CASES repository variable.
+  PROPTEST_CASES: ${{ vars.PROPTEST_CASES || '256' }}
 
 jobs:
   build_and_test:
@@ -21,14 +27,22 @@ jobs:
 
       - name: Setup Rust
         run: |
+          if [ -z "${RUST_TOOLCHAIN}" ]; then
+            RUST_TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' ../rust-toolchain.toml)
+          fi
+          if [ -z "${RUST_TOOLCHAIN}" ]; then
+            echo "::error::Could not determine Rust toolchain: vars.RUST_TOOLCHAIN unset and no channel found in rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" >> "$GITHUB_ENV"
           rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal --target wasm32v1-none
           rustup default ${RUST_TOOLCHAIN}
           rustup component add rustfmt clippy --toolchain ${RUST_TOOLCHAIN}
-        env:
-          RUSTUP_TOOLCHAIN: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache Rust dependencies
         uses: stellar/actions/rust-cache@main
+        with:
+          cache-targets: wasm32v1-none
 
       - name: Install cargo-audit
         run: |
@@ -39,6 +53,16 @@ jobs:
       - name: Build test wasm artifacts
         run: make build
 
+      - name: Install Stellar CLI
+        # The action tag pins the installed stellar-cli version (here, 26.1.0).
+        uses: stellar/stellar-cli@v26.1.0
+
+      - name: Build factory contract wasm
+        run: make -C factory build
+
+      - name: Assert factory wasm artifact exists
+        run: test -s target/wasm32v1-none/release/factory.wasm
+
       - name: Format check
         run: cargo +${RUST_TOOLCHAIN} fmt -- --check
 
@@ -48,5 +72,81 @@ jobs:
       - name: Security audit
         run: cargo +${RUST_TOOLCHAIN} audit
 
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny &> /dev/null; then
+            cargo install --locked cargo-deny
+          fi
+
+      # advisories are advisory-only (a new advisory shouldn't break CI);
+      # bans, licenses, and sources are a hard gate.
+      - name: Supply-chain advisories (cargo-deny, non-blocking)
+        continue-on-error: true
+        run: cargo deny check advisories --config ../deny.toml
+
+      - name: Supply-chain bans/licenses/sources (cargo-deny)
+        run: cargo deny check bans licenses sources --config ../deny.toml
+
       - name: Run tests
         run: make test
+
+  coverage:
+    name: Coverage (report-only)
+    runs-on: ubuntu-latest
+    # Coverage is a visibility signal, not a hard gate. Marking the whole job
+    # non-blocking ensures setup/install failures (toolchain, cargo install,
+    # fixture build) never fail the reusable workflow and block CI — not just
+    # the measurement step.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: contracts
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: |
+          if [ -z "${RUST_TOOLCHAIN}" ]; then
+            RUST_TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' ../rust-toolchain.toml)
+          fi
+          if [ -z "${RUST_TOOLCHAIN}" ]; then
+            echo "::error::Could not determine Rust toolchain: vars.RUST_TOOLCHAIN unset and no channel found in rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" >> "$GITHUB_ENV"
+          rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal --target wasm32v1-none
+          rustup default ${RUST_TOOLCHAIN}
+          rustup component add llvm-tools-preview --toolchain ${RUST_TOOLCHAIN}
+
+      - name: Cache Rust dependencies
+        uses: stellar/actions/rust-cache@main
+        with:
+          cache-targets: wasm32v1-none
+
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! command -v cargo-llvm-cov &> /dev/null; then
+            cargo install --locked cargo-llvm-cov
+          fi
+
+      - name: Build issuer wasm fixture
+        run: make build
+
+      - name: Measure coverage (report-only)
+        # Coverage of a #![no_std] contract measured via native `cargo test`
+        # reflects host-execution coverage, not on-chain semantics, and proptest
+        # case counts make line hits vary run-to-run. It is a visibility signal,
+        # not a hard gate, so failures here never block the build.
+        continue-on-error: true
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: contracts/lcov.info
+          if-no-files-found: ignore

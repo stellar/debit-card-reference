@@ -5,14 +5,16 @@ extern crate std;
 
 use super::{
     events::{
-        ContractUpgraded, IssuerUpgraded, ManagedUpdated, OwnerUpdated, PauserUpdated,
-        UserVelocityUpdated,
+        ContractUpgraded, IssuerCreated, IssuerUpgraded, ManagedUpdated, OwnerUpdated, Paused,
+        PauserUpdated, TransferExecuted, Unpaused, UserVelocityUpdated,
     },
-    storage::set_user_velocity,
+    storage::{set_user_velocity, PersistentKey},
+    velocity::MIN_PERIOD_DURATION_SECONDS,
     Factory, FactoryClient, FactoryError, UserVelocity,
 };
 use proptest::prelude::*;
 use rstest::rstest;
+use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{xdr::ToXdr, Address, BytesN, Env, Event, IntoVal};
@@ -910,11 +912,116 @@ fn paused_state_blocks_mutating_entrypoints() {
     );
     assert_eq!(transfer, Err(Ok(FactoryError::EnforcedPause.into())));
 
+    // Manager rotation is owner-gated and authority-replacing: permitted while
+    // paused so the owner can rotate out a compromised manager during an incident.
     let manager_rotation = factory.try_set_authorized_manager(&setup.issuer_id, &new_manager);
-    assert_eq!(
-        manager_rotation,
-        Err(Ok(FactoryError::EnforcedPause.into()))
+    assert_eq!(manager_rotation, Ok(Ok(())));
+    assert!(factory.is_authorized_manager(&setup.issuer_id, &new_manager));
+}
+
+#[test]
+fn revoke_debitor_succeeds_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    assert!(factory.is_authorized_debitor(&setup.issuer_id, &setup.debitor));
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let revoke = factory.try_update_authorized_debitor(&setup.issuer_id, &setup.debitor, &false);
+    assert_eq!(revoke, Ok(Ok(())));
+    assert!(!factory.is_authorized_debitor(&setup.issuer_id, &setup.debitor));
+    assert!(factory.paused());
+}
+
+#[test]
+fn authorize_debitor_blocked_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_debitor = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let authorize = factory.try_update_authorized_debitor(&setup.issuer_id, &new_debitor, &true);
+    assert_eq!(authorize, Err(Ok(FactoryError::EnforcedPause.into())));
+    assert!(!factory.is_authorized_debitor(&setup.issuer_id, &new_debitor));
+}
+
+#[test]
+fn remove_destination_succeeds_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    assert!(factory.is_authorized_destination(&setup.issuer_id, &setup.destination));
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let remove =
+        factory.try_update_issuer_destination(&setup.issuer_id, &setup.destination, &false);
+    assert_eq!(remove, Ok(Ok(())));
+    assert!(!factory.is_authorized_destination(&setup.issuer_id, &setup.destination));
+    assert!(factory.paused());
+}
+
+#[test]
+fn add_destination_blocked_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_destination = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let add = factory.try_update_issuer_destination(&setup.issuer_id, &new_destination, &true);
+    assert_eq!(add, Err(Ok(FactoryError::EnforcedPause.into())));
+    assert!(!factory.is_authorized_destination(&setup.issuer_id, &new_destination));
+}
+
+#[test]
+fn rotate_manager_succeeds_while_paused() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let new_manager = Address::generate(&setup.env);
+
+    factory.pause();
+    assert!(factory.paused());
+
+    let rotate = factory.try_set_authorized_manager(&setup.issuer_id, &new_manager);
+    assert_eq!(rotate, Ok(Ok(())));
+    assert!(factory.is_authorized_manager(&setup.issuer_id, &new_manager));
+    assert!(!factory.is_authorized_manager(&setup.issuer_id, &setup.manager));
+    assert!(factory.paused());
+}
+
+#[test]
+fn freeze_then_revoke_then_resume_incident_flow() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    // Freeze the system in response to a compromised debitor.
+    factory.pause();
+    assert!(factory.paused());
+
+    // Revoke the compromised debitor while still frozen — no transient re-open window.
+    let revoke = factory.try_update_authorized_debitor(&setup.issuer_id, &setup.debitor, &false);
+    assert_eq!(revoke, Ok(Ok(())));
+
+    // Resume normal operations.
+    factory.unpause();
+    assert!(!factory.paused());
+
+    // The revoked debitor cannot transfer after resume.
+    let transfer = factory.try_transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &1,
+        &setup.destination,
+        &rand_bytes(&setup.env),
     );
+    assert_eq!(transfer, Err(Ok(FactoryError::DebitorNotAuthorized.into())));
 }
 
 #[rstest]
@@ -957,6 +1064,62 @@ fn velocity_rejects_invalid_config(
         &per_transaction_spend_limit,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidVelocityConfig.into())));
+}
+
+#[test]
+fn velocity_rejects_per_tx_exceeding_period() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let result = factory.try_update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &3600,
+        &100,
+        &200,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidVelocityConfig.into())));
+}
+
+#[test]
+fn velocity_rejects_below_minimum_duration() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    let result = factory.try_update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &(MIN_PERIOD_DURATION_SECONDS - 1),
+        &1000,
+        &1000,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidVelocityConfig.into())));
+}
+
+#[test]
+fn velocity_accepts_equal_limits() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    factory.update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &MIN_PERIOD_DURATION_SECONDS,
+        &1000,
+        &1000,
+    );
+
+    let configured =
+        factory.get_user_velocity(&setup.issuer_id, &setup.token_address, &setup.user_account);
+    assert_eq!(configured.per_transaction_spend_limit, 1000);
+    assert_eq!(configured.period_spend_limit, 1000);
+    assert_eq!(
+        configured.period_duration_seconds,
+        MIN_PERIOD_DURATION_SECONDS
+    );
 }
 
 #[rstest]
@@ -1540,6 +1703,118 @@ fn upgrade_issuer_emits_issuer_upgraded_event() {
         .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
 }
 
+#[test]
+fn pause_emits_paused_event() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    factory.pause();
+
+    let expected_event = Paused {
+        pauser: setup.pauser.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn unpause_emits_unpaused_event() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+
+    factory.pause();
+    factory.unpause();
+
+    let expected_event = Unpaused {
+        pauser: setup.pauser.clone(),
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
+#[test]
+fn issuer_created_event_includes_token() {
+    // The test event buffer retains only the most recent emission, so create
+    // the issuer as the final operation and assert immediately afterwards.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner = Address::generate(&env);
+    let pauser = Address::generate(&env);
+    let manager = Address::generate(&env);
+    let destination = Address::generate(&env);
+    let issuer_id = rand_bytes(&env);
+
+    let issuer_wasm_hash = upload_issuer_wasm(&env);
+    let factory_address = env.register(Factory, (owner, pauser, issuer_wasm_hash));
+    let factory = FactoryClient::new(&env, &factory_address);
+
+    let token_admin_address = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin_address);
+    let token_address = sac.address();
+
+    let issuer_address = factory.create_issuer(&issuer_id, &token_address, &manager, &destination);
+
+    let expected_event = IssuerCreated {
+        issuer_id: issuer_id.clone(),
+        token: token_address.clone(),
+        issuer: issuer_address.clone(),
+        manager: manager.clone(),
+        destination: destination.clone(),
+    };
+    let events = env.events().all().filter_by_contract(&factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&env, &factory_address)));
+}
+
+#[test]
+fn transfer_event_includes_issuer_id_and_debitor() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let transfer_uuid = rand_bytes(&setup.env);
+
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &transfer_uuid,
+    );
+
+    let expected_event = TransferExecuted {
+        uuid: transfer_uuid.clone(),
+        issuer_id: setup.issuer_id.clone(),
+        account: setup.user_account.clone(),
+        debitor: setup.debitor.clone(),
+        destination: setup.destination.clone(),
+        token: setup.token_address.clone(),
+        amount: AMOUNT,
+    };
+    let events = setup
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&setup.factory_address);
+    assert!(events
+        .events()
+        .contains(&expected_event.to_xdr(&setup.env, &setup.factory_address)));
+}
+
 proptest! {
     #![proptest_config(proptest_config())]
 
@@ -1685,7 +1960,7 @@ proptest! {
     #[test]
     fn prop_period_resets_after_duration(
         (first_amount, second_amount, period_limit, period_duration_seconds, third_amount) in
-            (1i128..=300, 1i128..=300, 1u64..=120)
+            (1i128..=300, 1i128..=300, MIN_PERIOD_DURATION_SECONDS..=(MIN_PERIOD_DURATION_SECONDS + 120))
                 .prop_flat_map(|(first_amount, second_amount, period_duration_seconds)| {
                     let min_limit = if first_amount > second_amount {
                         first_amount
@@ -1763,4 +2038,133 @@ proptest! {
         prop_assert!(third.is_ok());
         prop_assert_eq!(token.balance(&setup.destination), first_amount + third_amount);
     }
+}
+
+/// Ledgers to decay before re-checking TTLs: enough to push entries that were
+/// extended to the network maximum (6,312,000 in the test env) below the
+/// contract's ~30-day extension threshold, without any TTL reaching zero.
+const TTL_DECAY_LEDGERS: u32 = 5_900_000;
+
+fn persistent_ttl(setup: &TestContext, key: &PersistentKey) -> u32 {
+    setup.env.as_contract(&setup.factory_address, || {
+        setup.env.storage().persistent().get_ttl(key)
+    })
+}
+
+fn instance_ttl(setup: &TestContext, contract: &Address) -> u32 {
+    setup
+        .env
+        .as_contract(contract, || setup.env.storage().instance().get_ttl())
+}
+
+/// The maximum TTL extensions can reach, as the contract computes it
+/// (`max_entry_ttl` minus the current ledger).
+fn network_max_ttl(setup: &TestContext) -> u32 {
+    setup
+        .env
+        .as_contract(&setup.factory_address, || setup.env.storage().max_ttl())
+}
+
+/// Every persistent policy entry created by `TestContext::for_flow`.
+fn policy_keys(setup: &TestContext) -> [PersistentKey; 5] {
+    [
+        PersistentKey::UserVelocity(
+            setup.issuer_id.clone(),
+            setup.token_address.clone(),
+            setup.user_account.clone(),
+        ),
+        PersistentKey::AuthorizedDebitor(setup.issuer_id.clone(), setup.debitor.clone()),
+        PersistentKey::AllowedDestination(setup.issuer_id.clone(), setup.destination.clone()),
+        PersistentKey::IssuerAddress(setup.issuer_id.clone(), setup.token_address.clone()),
+        PersistentKey::IssuerManager(setup.issuer_id.clone()),
+    ]
+}
+
+#[test]
+fn setup_extends_all_ttls_to_network_max() {
+    let setup = TestContext::for_flow(true, true);
+    let max_ttl = network_max_ttl(&setup);
+
+    // Fresh entries are created with the network minimum TTL (4096 in the
+    // test env); the storage accessors must have extended every one to max.
+    for key in policy_keys(&setup) {
+        assert_eq!(persistent_ttl(&setup, &key), max_ttl);
+    }
+    assert_eq!(instance_ttl(&setup, &setup.factory_address), max_ttl);
+    assert_eq!(instance_ttl(&setup, &setup.issuer_address), max_ttl);
+}
+
+#[test]
+fn transfer_extends_ttls_of_entries_it_touches() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let token = TokenClient::new(&setup.env, &setup.token_address);
+    let max_ttl = network_max_ttl(&setup);
+    let decayed_ttl = max_ttl - TTL_DECAY_LEDGERS;
+
+    let sequence = setup.env.ledger().sequence();
+    setup
+        .env
+        .ledger()
+        .set_sequence_number(sequence + TTL_DECAY_LEDGERS);
+    for key in policy_keys(&setup) {
+        assert_eq!(persistent_ttl(&setup, &key), decayed_ttl);
+    }
+
+    // Refresh the token allowance, which expired with the ledger jump.
+    token.approve(
+        &setup.user_account,
+        &setup.issuer_address,
+        &INITIAL_BALANCE,
+        &(setup.env.ledger().sequence() + 1000),
+    );
+    factory.transfer_to_destination(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.debitor,
+        &setup.user_account,
+        &AMOUNT,
+        &setup.destination,
+        &rand_bytes(&setup.env),
+    );
+
+    let [velocity, debitor, destination, issuer_address, manager] = policy_keys(&setup);
+    // The transfer writes velocity and only reads debitor, destination, and
+    // issuer address; reads and writes alike must extend back to max.
+    assert_eq!(persistent_ttl(&setup, &velocity), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &debitor), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &destination), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &issuer_address), max_ttl);
+    // The manager entry is not touched by transfers and keeps decaying.
+    assert_eq!(persistent_ttl(&setup, &manager), decayed_ttl);
+    // Both contract instances were kept alive.
+    assert_eq!(instance_ttl(&setup, &setup.factory_address), max_ttl);
+    assert_eq!(instance_ttl(&setup, &setup.issuer_address), max_ttl);
+}
+
+#[test]
+fn manager_call_extends_manager_and_velocity_ttls() {
+    let setup = TestContext::for_flow(true, true);
+    let factory = FactoryClient::new(&setup.env, &setup.factory_address);
+    let max_ttl = network_max_ttl(&setup);
+
+    let sequence = setup.env.ledger().sequence();
+    setup
+        .env
+        .ledger()
+        .set_sequence_number(sequence + TTL_DECAY_LEDGERS);
+
+    factory.update_user_velocity(
+        &setup.issuer_id,
+        &setup.token_address,
+        &setup.user_account,
+        &3600,
+        &(INITIAL_BALANCE * 10),
+        &(INITIAL_BALANCE * 10),
+    );
+
+    let [velocity, _, _, _, manager] = policy_keys(&setup);
+    assert_eq!(persistent_ttl(&setup, &velocity), max_ttl);
+    assert_eq!(persistent_ttl(&setup, &manager), max_ttl);
+    assert_eq!(instance_ttl(&setup, &setup.factory_address), max_ttl);
 }

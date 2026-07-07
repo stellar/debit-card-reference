@@ -913,17 +913,11 @@ fn paused_state_blocks_mutating_entrypoints() {
     assert_eq!(transfer, Err(Ok(FactoryError::EnforcedPause.into())));
 
     // Manager rotation is owner-gated and authority-replacing: permitted while
-    // paused so the owner can rotate out a compromised manager during an incident
-    // (FIND-005 revoke-while-paused carve-out).
+    // paused so the owner can rotate out a compromised manager during an incident.
     let manager_rotation = factory.try_set_authorized_manager(&setup.issuer_id, &new_manager);
     assert_eq!(manager_rotation, Ok(Ok(())));
     assert!(factory.is_authorized_manager(&setup.issuer_id, &new_manager));
 }
-
-// FIND-005 Part A — revoke-while-paused carve-out. Authority-reducing operations
-// (revoke debitor / remove destination / rotate manager) are permitted while paused
-// so an operator can freeze and surgically revoke at once; authority-adding
-// operations stay pause-gated.
 
 #[test]
 fn revoke_debitor_succeeds_while_paused() {
@@ -2045,8 +2039,6 @@ proptest! {
         prop_assert_eq!(token.balance(&setup.destination), first_amount + third_amount);
     }
 }
-
-// --- FIND-002: storage TTL management ---
 
 /// Ledgers to decay before re-checking TTLs: enough to push entries that were
 /// extended to the network maximum (6,312,000 in the test env) below the

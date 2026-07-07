@@ -98,18 +98,20 @@ enrolled user base. Four controls bound that blast radius:
    forced payments to *legitimate* destinations, which the operator can reverse
    off-chain. This separation of duties is the one hard on-chain bound.
 2. Per-account drain is rate-limited. The per-transaction cap, the
-   rolling-period cap, and the one-transfer-per-ledger guard
+   fixed-window period cap, and the one-transfer-per-ledger guard
    (`validate_and_update_user_velocity`) cap how fast any single cardholder can
    be drained.
 3. Each debit is bounded by the cardholder's allowance amount and its
    `expiration_ledger`. No debit can exceed the approved amount, and the
    exposure ends when the allowance expires or is re-approved to `0`.
 4. Incident response. The `pauser` can freeze *all* transfers globally, and the
-   `manager` can revoke the key with `update_authorized_debitor`. These are
-   alternative levers, not simultaneous ones: `update_authorized_debitor` is
-   itself pause-gated, so revocation requires a non-paused contract. Freeze
-   first to stop the bleeding (then unpause to revoke), or revoke the key first
-   and pause only if broader containment is needed.
+   `manager` can revoke the key with `update_authorized_debitor`. These levers
+   compose: authority-reducing operations — revoking a debitor, removing a
+   destination, rotating a manager — are permitted while paused, so the
+   response to a suspected compromise is freeze first, revoke the compromised
+   key during the same freeze, then unpause. Only authority-adding operations
+   (authorizing a debitor, adding a destination) require a non-paused
+   contract.
 
 ### Deployment Guidance
 
@@ -136,9 +138,12 @@ enrolled user base. Four controls bound that blast radius:
    alerts into the pause and debitor-revocation incident path so a suspected key
    compromise can be contained immediately.
 
-Pause does not constrain the owner: the upgrade paths are not pause-gated, and
-the owner can rotate roles and execute transfers through the paths above
-regardless of who holds the pauser role.
+Pause is not a trust boundary against the owner. The upgrade paths, the owner's
+role rotations (`set_owner`, `set_pauser_by_owner`, `set_authorized_manager`),
+and the authority-reducing operations above are not pause-gated, and the owner
+can always reclaim the pauser role and unpause. Transfers and authority-adding
+operations are pause-gated for everyone — owner included — but against the
+owner that is a delay (rotate the pauser, then unpause), not a barrier.
 
 ## Expected Setup Flow
 
@@ -261,12 +266,11 @@ single window boundary: a cardholder can spend the full limit just before a
 window elapses and the full limit again immediately after the reset, within a
 span shorter than `period_duration_seconds`. This is an inherent property of
 fixed-window rate limiting. Size `period_spend_limit` and
-`period_duration_seconds` with that boundary burst in mind, and keep
-`period_duration_seconds` large enough that the per-ledger / one-transfer-per-
-ledger controls remain the finer-grained limit. A very small
-`period_duration_seconds` (for example `1`) makes nearly every ledger a fresh
-window, collapsing the period cap to a per-ledger limit; pick a duration well
-above the ledger interval.
+`period_duration_seconds` with that boundary burst in mind. Windows shorter
+than `MIN_PERIOD_DURATION_SECONDS` (one hour) are rejected with
+`InvalidVelocityConfig`, since they would reset on nearly every ledger and
+collapse the period cap to a per-ledger limit — see
+[Velocity Configuration](#velocity-configuration).
 
 ### Limitations
 
@@ -346,8 +350,7 @@ Follow this runbook for every issuer upgrade:
 1. Upload the new WASM with `stellar contract upload` and record the returned
    hash.
 1. Deploy that exact WASM to a throwaway contract on the same network and verify
-   it exposes a working factory-authorized `upgrade` entrypoint (the fixture in
-   `contracts/issuer-upgrade-fixture` exists for this purpose).
+   it exposes a working factory-authorized `upgrade` entrypoint.
 1. Only then call `upgrade_issuer` with the verified hash.
 1. Treat a bad target hash as unrecoverable for that `(issuer_id, token)` pair:
    plan upgrades during a maintenance window and double-check the hash against

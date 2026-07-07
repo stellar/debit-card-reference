@@ -17,6 +17,7 @@ export const initialState: AppState = {
   issuerContractId: null,
   issuerId: null,
   destinationAddress: null,
+  paused: null,
   logs: [],
   activeTab: "setup",
   displayUnits: "stroops",
@@ -54,6 +55,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     case "SET_DESTINATION":
       return { ...state, destinationAddress: action.destinationAddress };
+    case "SET_PAUSED":
+      return { ...state, paused: action.paused };
     case "ADD_LOG":
       return {
         ...state,

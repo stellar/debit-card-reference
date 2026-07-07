@@ -24,6 +24,7 @@ const XDR_RICH_METHODS = new Set([
 // Methods on rpc.Server that we want to log
 const LOGGED_METHODS = new Set([
   "getAccount",
+  "getEvents",
   "getHealth",
   "getLatestLedger",
   "getLedgerEntries",
@@ -109,6 +110,15 @@ export function getSorobanServer(): rpc.Server {
               }
             } else if (methodName === "getLatestLedger") {
               responseSummary = result;
+            } else if (methodName === "getEvents") {
+              const eventsResult = result as {
+                events: unknown[];
+                latestLedger: number;
+              };
+              responseSummary = {
+                events: eventsResult.events.length,
+                latestLedger: eventsResult.latestLedger,
+              };
             } else {
               responseSummary = { type: typeof result };
             }

@@ -110,6 +110,24 @@
     }
   }
 
+  &__pause {
+    font-family: "Inconsolata", monospace;
+    font-weight: var(--sds-fw-semi-bold);
+    color: var(--sds-clr-gray-08);
+
+    &[data-paused="false"] {
+      color: var(--sds-clr-lime-09);
+    }
+
+    &[data-paused="true"] {
+      padding: 0 pxToRem(6px);
+      border: 1px solid var(--sds-clr-red-06);
+      border-radius: pxToRem(4px);
+      background-color: var(--sds-clr-red-03);
+      color: var(--sds-clr-red-11);
+    }
+  }
+
   &__unitToggle {
     margin-left: auto;
     padding: pxToRem(2px) pxToRem(10px);

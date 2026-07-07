@@ -9,6 +9,8 @@ export interface AuthEntryInfo {
 
 export interface EventInfo {
   type: string;
+  /** Contract event name (first topic symbol), when present. */
+  name?: string;
   topics: string[];
   data: string;
 }
@@ -135,16 +137,42 @@ export function decodeAuthEntries(raw: unknown): AuthEntryInfo[] | null {
   }
 }
 
+function eventNameFromTopics(topics: xdr.ScVal[]): string | undefined {
+  try {
+    const first = topics[0];
+    if (first?.switch() === xdr.ScValType.scvSymbol()) {
+      return first.sym().toString();
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
 function decodeContractEventBody(event: xdr.ContractEvent): EventInfo {
   try {
     const type = event.type().name;
     const body = event.body().v0();
+    const name = eventNameFromTopics(body.topics());
     const topics = body.topics().map((t) => safeScValToNative(t));
     const data = safeScValToNative(body.data());
-    return { type, topics, data };
+    return { type, name, topics, data };
   } catch {
     return { type: "unknown", topics: [], data: "decode error" };
   }
+}
+
+// Decodes an event as returned by RPC `getEvents` (already-parsed ScVals).
+export function decodeRpcEvent(
+  topics: xdr.ScVal[],
+  value: xdr.ScVal,
+): EventInfo {
+  return {
+    type: "contract",
+    name: eventNameFromTopics(topics),
+    topics: topics.map((t) => safeScValToNative(t)),
+    data: safeScValToNative(value),
+  };
 }
 
 export function decodeDiagnosticEvents(raw: unknown): EventInfo[] | null {

@@ -1,15 +1,14 @@
 const FACTORY_ERRORS: Record<number, string> = {
   0: "Debitor is not authorized for this issuer",
   1: "Destination is not on the allowlist for this issuer",
-  2: "Velocity configuration is invalid",
+  2: "Velocity configuration is invalid (period < 3600s, per-tx limit > period limit, or negative limit)",
   3: "Transfer amount is invalid (must be > 0)",
   4: "Transfer exceeds per-transaction spend limit",
-  5: "Transfer exceeds rolling period spend limit",
+  5: "Transfer exceeds the fixed-window period spend limit",
   6: "Only one transfer per ledger is allowed for this user",
   7: "Issuer not found for this (issuer_id, token) pair",
   8: "Issuer manager not found",
   9: "Issuer already exists for this (issuer_id, token) pair",
-  10: "Caller is not authorized for this operation",
   1000: "Contract is paused",
   1001: "Contract is not paused",
 };

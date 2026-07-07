@@ -130,6 +130,11 @@ export const Manager = () => {
                 {debitorAuthorized ? "Authorize" : "Revoke"}
               </span>
             </div>
+            <Text as="p" size="xs">
+              Revoking (authorized = false) is permitted while the contract is
+              paused; authorizing requires an unpaused contract (FIND-008
+              carve-out).
+            </Text>
             <Button
               size="sm"
               variant="secondary"
@@ -166,7 +171,7 @@ export const Manager = () => {
               label="Period Duration (seconds)"
               value={periodSeconds}
               onChange={(e) => setPeriodSeconds(e.target.value)}
-              note="86400 = 24 hours"
+              note="86400 = 24 hours; must be ≥ 3600 (one hour) — smaller values are rejected on-chain"
             />
             <Input
               id="period-limit"
@@ -181,6 +186,7 @@ export const Manager = () => {
               label={amountLabel("Per-Transaction Limit", units)}
               value={txLimit}
               onChange={(e) => setTxLimit(e.target.value)}
+              note="must not exceed Period Spend Limit; both must be ≥ 0"
             />
             <Button
               size="sm"

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Button, Card, Heading, Input, Text } from "@stellar/design-system";
+import { Button, Card, Heading, Input, Text, Toggle } from "@stellar/design-system";
 
 import { useAppState, useAppDispatch } from "@/store.ts";
 import { errorMessage } from "@/helper/errors.ts";
@@ -9,6 +9,9 @@ import {
   getPauser,
   setOwner,
   setPauserByOwner,
+  setAuthorizedManager,
+  updateIssuerDestination,
+  isAuthorizedDestination,
   upgradeFactory,
   upgradeIssuer,
 } from "@/soroban/factory.ts";
@@ -129,6 +132,106 @@ export const Owner = () => {
       setPauserTransferLoading(false);
     }
   }, [ownerKp, state.factoryContractId, newPauserSecret, dispatch]);
+
+  // --- Destination Allowlist ---
+  const [destAddress, setDestAddress] = useState(
+    state.roles.destination.keypair?.publicKey() ??
+      state.destinationAddress ??
+      "",
+  );
+  const [destAllowed, setDestAllowed] = useState(true);
+  const [destLoading, setDestLoading] = useState(false);
+  const [destError, setDestError] = useState("");
+  const [destResult, setDestResult] = useState("");
+  const [destCheckResult, setDestCheckResult] = useState<boolean | null>(null);
+
+  const handleUpdateDestination = useCallback(async () => {
+    if (!ownerKp || !state.factoryContractId || !state.issuerId) return;
+    setDestLoading(true);
+    setDestError("");
+    setDestResult("");
+    setDestCheckResult(null);
+    try {
+      await updateIssuerDestination({
+        factoryId: state.factoryContractId,
+        issuerId: hexToBytes(state.issuerId),
+        destination: destAddress,
+        allowed: destAllowed,
+        ownerKeypair: ownerKp,
+      });
+      setDestResult(
+        `Destination ${destAllowed ? "added to" : "removed from"} allowlist`,
+      );
+    } catch (e) {
+      setDestError(errorMessage(e));
+    } finally {
+      setDestLoading(false);
+    }
+  }, [ownerKp, state.factoryContractId, state.issuerId, destAddress, destAllowed]);
+
+  const handleCheckDestination = useCallback(async () => {
+    if (!ownerKp || !state.factoryContractId || !state.issuerId) return;
+    setDestLoading(true);
+    setDestError("");
+    try {
+      const allowed = await isAuthorizedDestination({
+        factoryId: state.factoryContractId,
+        issuerId: hexToBytes(state.issuerId),
+        destination: destAddress,
+        callerPublicKey: ownerKp.publicKey(),
+      });
+      setDestCheckResult(allowed);
+    } catch (e) {
+      setDestError(errorMessage(e));
+    } finally {
+      setDestLoading(false);
+    }
+  }, [ownerKp, state.factoryContractId, state.issuerId, destAddress]);
+
+  // --- Rotate Manager ---
+  // Take the new manager's secret (not just an address) so the example app can
+  // rotate its local manager keypair on success — keeps the Manager tab usable
+  // immediately after rotation. The contract itself only needs the address.
+  const [newManagerSecret, setNewManagerSecret] = useState("");
+  const [newManagerSecretError, setNewManagerSecretError] = useState("");
+  const [managerRotateLoading, setManagerRotateLoading] = useState(false);
+  const [managerRotateError, setManagerRotateError] = useState("");
+  const [managerRotateResult, setManagerRotateResult] = useState("");
+
+  const handleSetManager = useCallback(async () => {
+    if (!ownerKp || !state.factoryContractId || !state.issuerId) return;
+    const validationError = getSecretKeyError(newManagerSecret);
+    if (validationError) {
+      setNewManagerSecretError(validationError);
+      return;
+    }
+    setManagerRotateLoading(true);
+    setManagerRotateError("");
+    setManagerRotateResult("");
+    try {
+      const newManagerKp = importKeypair(newManagerSecret);
+      const newManagerAddr = newManagerKp.publicKey();
+      await setAuthorizedManager({
+        factoryId: state.factoryContractId,
+        issuerId: hexToBytes(state.issuerId),
+        manager: newManagerAddr,
+        ownerKeypair: ownerKp,
+      });
+      dispatch({ type: "SET_KEYPAIR", role: "manager", keypair: newManagerKp });
+      setManagerRotateResult(`Manager rotated to ${newManagerAddr}`);
+      setNewManagerSecret("");
+    } catch (e) {
+      setManagerRotateError(errorMessage(e));
+    } finally {
+      setManagerRotateLoading(false);
+    }
+  }, [
+    ownerKp,
+    state.factoryContractId,
+    state.issuerId,
+    newManagerSecret,
+    dispatch,
+  ]);
 
   // --- Upgrade Factory ---
   const factoryWasmRef = useRef<HTMLInputElement>(null);
@@ -319,6 +422,114 @@ export const Owner = () => {
             )}
             {pauserTransferError && (
               <div className="InlineError">{pauserTransferError}</div>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* Destination Allowlist */}
+      <div className="PageSection">
+        <div className="PageSection__title">Destination Allowlist</div>
+        <Card>
+          <div className="FormStack">
+            <Text as="p" size="xs">
+              Add or remove a destination on the issuer&apos;s allowlist.
+              Removal is permitted while paused; adding requires an unpaused
+              contract (FIND-008 carve-out). Requires an active issuer.
+            </Text>
+            <Input
+              id="owner-dest-address"
+              fieldSize="sm"
+              label="Destination Address"
+              value={destAddress}
+              onChange={(e) => {
+                setDestAddress(e.target.value);
+                setDestCheckResult(null);
+              }}
+              disabled={!state.issuerId}
+            />
+            <div className="FormRow">
+              <Toggle
+                id="owner-dest-allowed"
+                checked={destAllowed}
+                fieldSize="sm"
+                onChange={() => setDestAllowed(!destAllowed)}
+                disabled={!state.issuerId}
+              />
+              <span className={destAllowed ? "InlineSuccess" : "InlineError"}>
+                {destAllowed ? "Allow" : "Remove"}
+              </span>
+            </div>
+            <div className="FormRow">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleUpdateDestination}
+                isLoading={destLoading}
+                disabled={!state.issuerId || !destAddress}
+              >
+                Submit
+              </Button>
+              <Button
+                size="sm"
+                variant="tertiary"
+                onClick={handleCheckDestination}
+                isLoading={destLoading}
+                disabled={!state.issuerId || !destAddress}
+              >
+                Check
+              </Button>
+              {destCheckResult !== null && (
+                <Text as="p" size="xs">
+                  {destCheckResult ? "Allowlisted" : "Not allowlisted"}
+                </Text>
+              )}
+            </div>
+            {destResult && <div className="InlineSuccess">{destResult}</div>}
+            {destError && <div className="InlineError">{destError}</div>}
+          </div>
+        </Card>
+      </div>
+
+      {/* Rotate Manager */}
+      <div className="PageSection">
+        <div className="PageSection__title">Rotate Manager</div>
+        <Card>
+          <div className="FormStack">
+            <Text as="p" size="xs">
+              Replace the issuer&apos;s manager. Owner-gated and
+              authority-replacing — permitted even while the contract is paused
+              (incident response). Paste the new manager&apos;s secret key so
+              this client can keep driving the Manager tab after rotation.
+              Requires an active issuer.
+            </Text>
+            <Input
+              id="owner-new-manager-secret"
+              fieldSize="sm"
+              label="New Manager Secret Key"
+              placeholder="S..."
+              value={newManagerSecret}
+              error={newManagerSecretError}
+              onChange={(e) => {
+                setNewManagerSecret(e.target.value);
+                setNewManagerSecretError("");
+              }}
+              disabled={!state.issuerId}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleSetManager}
+              isLoading={managerRotateLoading}
+              disabled={!state.issuerId || !newManagerSecret}
+            >
+              Rotate Manager
+            </Button>
+            {managerRotateResult && (
+              <div className="InlineSuccess">{managerRotateResult}</div>
+            )}
+            {managerRotateError && (
+              <div className="InlineError">{managerRotateError}</div>
             )}
           </div>
         </Card>

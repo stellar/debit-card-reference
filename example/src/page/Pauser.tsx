@@ -38,11 +38,12 @@ export const Pauser = () => {
         }),
       ]);
       setPausedState(status);
+      dispatch({ type: "SET_PAUSED", paused: status });
       setCurrentPauser(pauserAddr);
     } catch {
       // ignore query errors
     }
-  }, [state.factoryContractId, pauserKp]);
+  }, [state.factoryContractId, pauserKp, dispatch]);
 
   useEffect(() => {
     fetchStatus();
@@ -59,13 +60,14 @@ export const Pauser = () => {
         pauserKeypair: pauserKp,
       });
       setPausedState(true);
+      dispatch({ type: "SET_PAUSED", paused: true });
       setResult("Contract paused");
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setIsLoading(false);
     }
-  }, [pauserKp, state.factoryContractId]);
+  }, [pauserKp, state.factoryContractId, dispatch]);
 
   const handleUnpause = useCallback(async () => {
     if (!pauserKp || !state.factoryContractId) return;
@@ -78,13 +80,14 @@ export const Pauser = () => {
         pauserKeypair: pauserKp,
       });
       setPausedState(false);
+      dispatch({ type: "SET_PAUSED", paused: false });
       setResult("Contract unpaused");
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setIsLoading(false);
     }
-  }, [pauserKp, state.factoryContractId]);
+  }, [pauserKp, state.factoryContractId, dispatch]);
 
   // --- Transfer Pauser Role (as pauser) ---
   // Take the new pauser's secret (not just an address) so the example app can
@@ -195,6 +198,11 @@ export const Pauser = () => {
               contract is paused (use the Owner tab to recover from a
               compromised pauser). Paste the new pauser&apos;s secret key so
               this tab keeps working as the new pauser.
+            </Text>
+            <Text as="p" size="xs">
+              Note: authority-reducing operations elsewhere (revoke debitor,
+              remove destination, rotate manager) now work while paused, so
+              freeze-then-revoke is a single incident window.
             </Text>
             <Input
               id="pauser-new-secret"

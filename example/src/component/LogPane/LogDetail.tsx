@@ -129,7 +129,7 @@ export const LogDetail = ({
           <DetailSection title="Events" count={diagnosticEvents.length}>
             {diagnosticEvents.map((evt, i) => (
               <pre key={i} className="LogDetail__code">
-                {`${i}: ${evt.type}\n  topics: [${evt.topics.join(", ")}]\n  data:   ${evt.data}`}
+                {`${i}: ${evt.name ?? evt.type}\n  topics: [${evt.topics.join(", ")}]\n  data:   ${evt.data}`}
               </pre>
             ))}
           </DetailSection>
@@ -147,7 +147,7 @@ export const LogDetail = ({
           <DetailSection title="Contract Events" count={txEvents.length}>
             {txEvents.map((evt, i) => (
               <pre key={i} className="LogDetail__code">
-                {`${i}: ${evt.type}\n  topics: [${evt.topics.join(", ")}]\n  data:   ${evt.data}`}
+                {`${i}: ${evt.name ?? evt.type}\n  topics: [${evt.topics.join(", ")}]\n  data:   ${evt.data}`}
               </pre>
             ))}
           </DetailSection>

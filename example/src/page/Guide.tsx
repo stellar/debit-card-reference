@@ -82,7 +82,12 @@ export const Guide = () => {
             </div>
             <Text as="p" size="xs">
               Emergency freeze/unfreeze of all operations. Set at factory
-              deployment.
+              deployment. While paused, authority-<em>adding</em> operations
+              (authorize debitor, add destination, create issuer, set velocity,
+              transfer) are blocked, but authority-<em>reducing</em> ones
+              (revoke debitor, remove destination, rotate manager or pauser via
+              the owner) still work — so freeze-then-revoke is a single
+              incident window (FIND-008).
             </Text>
             <code className="Guide__fns">pause, unpause</code>
           </div>
@@ -133,7 +138,13 @@ export const Guide = () => {
           checks before funds move:
         </Text>
         <div className="Guide__flow">
-          <div className="Guide__flowStep">Pause check</div>
+          <div className="Guide__flowStep">
+            Pause check
+            <span className="Guide__flowDetail">
+              Blocks transfers and all authority-adding ops; authority-reducing
+              ops stay available
+            </span>
+          </div>
           <div className="Guide__flowArrow" />
           <div className="Guide__flowStep">Debitor authorized?</div>
           <div className="Guide__flowArrow" />
@@ -142,7 +153,8 @@ export const Guide = () => {
           <div className="Guide__flowStep Guide__flowStep--velocity">
             Velocity limits
             <span className="Guide__flowDetail">
-              Amount &gt; 0, per-tx limit, period limit, one-per-ledger
+              Amount &gt; 0, per-tx limit, fixed-window period limit,
+              one-per-ledger
             </span>
           </div>
           <div className="Guide__flowArrow" />
@@ -154,6 +166,14 @@ export const Guide = () => {
             Event emitted
           </div>
         </div>
+        <Text as="p" size="xs">
+          Velocity periods are <strong>fixed windows</strong>, not rolling
+          ones: the window anchors at the first spend and re-anchors on the
+          first transfer after it elapses. Around a window boundary, up to ~2x
+          the period limit can clear in a short wall-clock span (full limit
+          just before the reset, full limit just after) — size limits
+          accordingly.
+        </Text>
       </div>
 
       {/* Role Hierarchy */}
@@ -190,6 +210,53 @@ export const Guide = () => {
             <span>Per-user &mdash; approves token allowance</span>
           </div>
         </div>
+      </div>
+
+      {/* Guided Scenarios */}
+      <div className="PageSection">
+        <div className="PageSection__title">Guided Scenarios</div>
+        <Text as="p" size="sm">
+          Walkthroughs that exercise the audited security properties end to
+          end. Run them after completing Setup; watch the StatusBar pause badge
+          and the log pane as you go.
+        </Text>
+
+        <Text as="p" size="sm">
+          <strong>1. Incident-response drill (FIND-008 / FIND-004)</strong>
+        </Text>
+        <Text as="p" size="xs">
+          Pauser tab: <code>pause</code> → Manager tab: revoke the debitor —
+          succeeds <em>while paused</em> (authority-reducing) → Debitor tab:
+          attempt a transfer — rejected with error #1000 (paused) → Pauser tab:{" "}
+          <code>unpause</code> → Debitor tab: retry the transfer — rejected
+          with error #0 (<code>DebitorNotAuthorized</code>). The compromise is
+          contained in a single freeze-then-revoke window.
+        </Text>
+
+        <Text as="p" size="sm">
+          <strong>2. Owner authority chain (FIND-001)</strong>
+        </Text>
+        <Text as="p" size="xs">
+          The owner is the system&apos;s root of trust — every guardrail is
+          owner-reachable. Demonstrate it: Owner tab: rotate the manager to a
+          key you control → Manager tab: authorize yourself as debitor → raise
+          the velocity limits → Owner tab: allowlist your own destination →
+          Debitor tab: transfer from the cardholder. Each step is a normal,
+          authorized call; protecting the owner key is the operational
+          requirement this walk demonstrates.
+        </Text>
+
+        <Text as="p" size="sm">
+          <strong>3. Debitor blast-radius bounds (FIND-004)</strong>
+        </Text>
+        <Text as="p" size="xs">
+          As debitor, probe each on-chain bound: exceed the per-transaction cap
+          — error #4 → exceed the period cap with repeated transfers — error #5
+          → attempt an un-allowlisted destination — error #1 → attempt two
+          transfers in one ledger — error #6. A compromised debitor key is
+          bounded by the destination allowlist and velocity controls; it cannot
+          move funds outside them.
+        </Text>
       </div>
     </div>
   );

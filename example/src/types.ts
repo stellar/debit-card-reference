@@ -42,6 +42,8 @@ export interface AppState {
   issuerContractId: string | null;
   issuerId: string | null;
   destinationAddress: string | null;
+  /** Last known contract pause state; null until first queried. */
+  paused: boolean | null;
   logs: LogEntry[];
   activeTab: TabName;
   displayUnits: DisplayUnits;
@@ -58,6 +60,7 @@ export type AppAction =
       issuerId: string;
     }
   | { type: "SET_DESTINATION"; destinationAddress: string }
+  | { type: "SET_PAUSED"; paused: boolean | null }
   | { type: "ADD_LOG"; entry: Omit<LogEntry, "id"> }
   | { type: "CLEAR_LOGS" }
   | { type: "SET_TAB"; tab: TabName }
